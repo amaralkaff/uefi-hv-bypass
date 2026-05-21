@@ -34,6 +34,7 @@
 #define OPHION_OP_WRITE_MANY           0x08
 #define OPHION_OP_LIST_PROCESSES       0x09
 #define OPHION_OP_RESOLVE_TARGET_BY_PID 0x0A   // Phase 6k
+#define OPHION_OP_READ_SCATTER         0x0B   // Grill Q10: gathered scatter-read
 
 // REGISTER request layout (r8 points to this struct in caller memory)
 typedef struct {
@@ -198,3 +199,36 @@ typedef struct {
 #define OPHION_STATUS_READ_FAILED          5
 #define OPHION_STATUS_INVALID_ARG          6
 #define OPHION_STATUS_WRITE_FAILED         7
+
+// READ_SCATTER (Grill Q10): gathered scatter-read for UE4 entity walks.
+// READ_MANY caps at 64 entries and scatters output to per-entry dst_va.
+// READ_SCATTER caps at 1024 entries and writes to a single contiguous out
+// buffer at caller-specified offsets — cache-friendly for tree traversal.
+//
+// Caller layout in VMCALL r8 buffer:
+//   [ophion_read_scatter_req_t][ophion_read_scatter_resp_t]
+// Output buffer is a SEPARATE caller VA (req.out_buf_va) — driver passes
+// system VA from MDL of user buffer; VMM probes via caller_cr3.
+#define OPHION_READ_SCATTER_MAX_ENTRIES  1024
+
+typedef struct {
+    uint64_t src_va;          // target process VA to read from
+    uint32_t len;             // bytes; 0 < len <= 4096
+    uint32_t out_offset;      // offset in out_buf_va where result lands
+} ophion_scatter_entry_t;
+
+typedef struct {
+    uint32_t target_pid;      // unused — uses session->target_cr3
+    uint32_t entry_count;     // 1..OPHION_READ_SCATTER_MAX_ENTRIES
+    uint64_t out_buf_va;      // caller VA of gathered output buffer
+    uint32_t out_buf_size;    // total bytes; bounds check for out_offset+len
+    uint32_t reserved;
+    ophion_scatter_entry_t entries[OPHION_READ_SCATTER_MAX_ENTRIES];
+} ophion_read_scatter_req_t;
+
+typedef struct {
+    uint32_t ok_count;        // entries that read full len
+    uint32_t fail_count;      // entries that returned 0 (walk failed)
+    uint32_t total_bytes;     // sum of successful read lengths
+    uint32_t status;          // OK if ok_count == entry_count, else READ_FAILED
+} ophion_read_scatter_resp_t;

@@ -471,6 +471,59 @@ handle_read_many(
 }
 
 //
+// Grill Q10: READ_SCATTER — gathered batched read for UE4 entity walks.
+// Same per-page read primitive as READ_MANY but writes results into a single
+// contiguous caller out buffer at caller-specified offsets, with 1024-entry
+// cap (vs READ_MANY's 64). Out buffer is a separate caller VA (out_buf_va);
+// driver provides system VA from MDL of user-mode gather buffer.
+//
+static UINT32
+handle_read_scatter(
+    IN  ophion_session_t            *s,
+    IN  ophion_read_scatter_req_t   *req,
+    OUT ophion_read_scatter_resp_t  *resp,
+    IN  UINT64                       caller_cr3
+    )
+{
+    if (!s || !req || !resp) return OPHION_STATUS_INVALID_ARG;
+    if (req->entry_count == 0) return OPHION_STATUS_INVALID_ARG;
+    if (req->entry_count > OPHION_READ_SCATTER_MAX_ENTRIES) return OPHION_STATUS_INVALID_ARG;
+    if (req->out_buf_va == 0 || req->out_buf_size == 0) return OPHION_STATUS_INVALID_ARG;
+    if (s->target_cr3 == 0) {
+        resp->status = OPHION_STATUS_TARGET_NOT_FOUND;
+        return OPHION_STATUS_TARGET_NOT_FOUND;
+    }
+
+    static UINT8 sc_scratch[0x1000];
+
+    UINT32 ok = 0, total = 0;
+    for (UINT32 i = 0; i < req->entry_count; i++) {
+        UINT64 src        = req->entries[i].src_va;
+        UINT32 len        = req->entries[i].len;
+        UINT32 out_off    = req->entries[i].out_offset;
+
+        if (len == 0 || len > sizeof(sc_scratch)) continue;
+        if ((UINT64)out_off + (UINT64)len > (UINT64)req->out_buf_size) continue;
+
+        UINTN got = vmm_guest_read(s->target_cr3, src, sc_scratch, len);
+        if (got != len) continue;
+        UINTN put = vmm_guest_write(caller_cr3, req->out_buf_va + out_off,
+                                    sc_scratch, len);
+        if (put != len) continue;
+
+        ok++;
+        total += len;
+    }
+
+    resp->ok_count   = ok;
+    resp->fail_count = req->entry_count - ok;
+    resp->total_bytes = total;
+    resp->status = (ok == req->entry_count) ? OPHION_STATUS_OK
+                                            : OPHION_STATUS_READ_FAILED;
+    return resp->status;
+}
+
+//
 // Phase 6d: cross-CR3 batched write. Symmetric to READ_MANY but src/dst CR3
 // flipped: read from caller, write to target.
 //
@@ -749,6 +802,15 @@ VmcallDispatch(
         ophion_read_many_resp_t *resp = (ophion_read_many_resp_t *)
             ((UINT8 *)caller_buf + sizeof(ophion_read_many_req_t));
         return handle_read_many(s, req, resp, caller_cr3);
+    }
+    case OPHION_OP_READ_SCATTER: {
+        if (caller_buf_size < (sizeof(ophion_read_scatter_req_t) +
+                               sizeof(ophion_read_scatter_resp_t)))
+            return OPHION_STATUS_INVALID_ARG;
+        ophion_read_scatter_req_t  *req  = (ophion_read_scatter_req_t  *)caller_buf;
+        ophion_read_scatter_resp_t *resp = (ophion_read_scatter_resp_t *)
+            ((UINT8 *)caller_buf + sizeof(ophion_read_scatter_req_t));
+        return handle_read_scatter(s, req, resp, caller_cr3);
     }
     case OPHION_OP_LIST_MODULES: {
         if (caller_buf_size < (sizeof(ophion_list_modules_req_t) +
