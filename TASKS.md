@@ -8,29 +8,20 @@ Workflow: direct commits to `main`. No PRs. Atomic conventional commits per step
 
 - [x] **Step #1** — `b934e70` chore: absorb Ophion driver into main repo (Q24-C)
 - [x] **Step #2** — `946f9a1` feat(abi): add OPHION_OP_READ_SCATTER (0x0B) (Q3+Q10)
-- [x] **Step #3** — `22368ef` feat(ophion): driver scaffolding for VMCALL relay (Q1+Q2+Q6+Q8+Q9-C)
-- [x] **Step #4** — `8db687c` feat(ophion): IOCTL_HV_REGISTER (Q3-B+Q4+Q5-D+Q6-B+Q7-B)
-- [x] **Step #5** — `1d49cb7` feat(ophion): IOCTL_HV_RESOLVE + IOCTL_HV_UNREGISTER (Q11-B)
-- [x] **Step #5b** — `fa941d2` feat(vmm): enable dev hash-bypass for OPHION_OP_REGISTER (Q5-D)
-- [x] **Step #6** — `a1ffe9a` feat(ophion): IOCTL_HV_READ_SCATTER METHOD_OUT_DIRECT (Q4-B+Q7-B)
-- [x] **Step #7** — `7b3ef9b` feat(ophion): IOCTL_HV_WRITE_MANY METHOD_IN_DIRECT
+- [x] **Step #3** — `22368ef` feat(ophion): driver scaffolding for VMCALL relay (Q9-C name `\Device\MsftHidIo`, Q6-B FsContext, Q8-B BSP worker, Q2-B trampoline VA parse)
+- [x] **Step #4** — `8db687c` feat(ophion): IOCTL_HV_REGISTER + `fa941d2` feat(vmm): dev hash bypass (Q5-D)
+- [x] **Step #5** — `1d49cb7` feat(ophion): IOCTL_HV_RESOLVE + IOCTL_HV_UNREGISTER
+- [x] **Step #6** — `a1ffe9a` feat(ophion): IOCTL_HV_READ_SCATTER (METHOD_OUT_DIRECT, MDL system VA)
+- [x] **Step #7** — `7b3ef9b` feat(ophion): IOCTL_HV_WRITE_MANY (METHOD_BUFFERED, scatter ABI)
+- [x] **Smoke #A+B** — `44dfb29` feat(pubg_external): wire hv_pipe to real IOCTLs + `hv_smoke.exe` harness. `cargo build --bin hv_smoke` green. Runtime cycle-loop deferred until driver loads on hardware.
+- [x] **Step #8 (partial)** — `1cf9286` feat(vmm): per-CPU exit log (Q21-C lock-free 1KB ring/CPU) + `VmmSpin.h` test-and-set spinlock (Q20-B). Still TODO: per-resource session/proc/ept locks wired in VmcallHandler, NV crash flush, IOCTL_HV_GET_LOG returning merged dump, `read_ophn_log.ps1` parser.
 
-## Build env blocker
+## Open / Next
 
-- [ ] **WDK toolset missing** — `WindowsKernelModeDriver10.0` PlatformToolset not installed in current `C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools`. VS Community uninstalled (memory `reference_ophion_build.md` path stale). Steps #3-#7 source verified by review only; binary build deferred until WDK component restored.
-
-## Resolved
-
-- **Q9 device-name** — final pick C (static `\Device\MsftHidIo`, no DosDevices). Recommendation accepted; B (NV var) reasoning weak.
+- [ ] **WDK toolset** — `WindowsKernelModeDriver10.0` PlatformToolset missing from VS18 BuildTools install. Driver build broken until WDK extension reinstalled. (Was working 2026-05-21.) Until then, all driver Steps are source-verified only.
+- [ ] **Step #8 finish** — wire `s_session_lock`/`s_proc_cache_lock`/`s_ept_lock` via `VmmSpin.h` in `VmcallHandler.c` session table accesses; add VMX-abort + machine-check NV flush of `VmmPclSnapshot` to `OphnCrashDump` NV var; extend driver `IOCTL_HV_GET_LOG` to return merged per-CPU log; teach `scripts/read_ophn_log.ps1` to decode the magic+cpu_count+rec_per_cpu+rings blob.
 
 ## Track A — VMCALL pipe + ESP
-
-- [ ] **Step #8** — VMM concurrency primitives (Q20-B + Q21-C)
-  - Per-resource spinlocks: `s_session_lock`, `s_ept_lock`, `s_proc_cache_lock`
-  - Per-CPU log rings (`PerCpuLog.c`, ~4KB each, EfiRuntimeServicesData)
-  - VMX-abort + machine-check NV flush to `OphnCrashDump`
-  - `IOCTL_HV_GET_LOG` returns merged 12-CPU dump
-  - Extend `read_ophn_log.ps1` parser
 
 - [ ] **Step #9** — pubg_external dumper (Q15-E)
   - `pubg_external/src/sdk/dumper.rs`: sig scan via SCATTER for GNames+GObjects+GWorld
