@@ -28,6 +28,7 @@
 #include "../include/OphionAbi.h"
 #include "../include/BuildInfo.h"
 #include "VmmSpin.h"
+#include "VmmPerCpuLog.h"
 
 extern UINT64 g_vmm_start_tsc;
 
@@ -110,6 +111,12 @@ static UINT64           g_register_counter = 0;
 // path stays lock-free in the BSP-only era. AP virt (Step #B1+) makes
 // this serialize cross-CPU REGISTER/UNREGISTER races.
 static VMM_SPIN g_session_lock;
+
+// Step #8 (Grill Q20-B): per-session target-process cache lock. Resolve
+// handlers mutate s->target_cr3/target_pid/target_image_base; concurrent
+// READ/WRITE handlers read those fields. BSP-only era: contention zero.
+// AP era: serializes RESOLVE racing in-flight READ_SCATTER on same session.
+static VMM_SPIN g_proc_cache_lock;
 
 static UINT64
 random_session_key(VOID)
@@ -324,9 +331,11 @@ handle_resolve_target(
                 resp->image_size  = 0;
                 resp->reserved    = 0;
                 resp->status      = OPHION_STATUS_OK;
+                UINT64 pcl_flags = VmmSpinAcquire(&g_proc_cache_lock);
                 s->target_pid          = (UINT32)pid;
                 s->target_image_base   = base;
                 s->target_cr3          = dtb;       // Phase 5d cache
+                VmmSpinRelease(&g_proc_cache_lock, pcl_flags);
                 g_resolve_iter_count = iter;
                 return OPHION_STATUS_OK;
             }
@@ -431,9 +440,11 @@ handle_resolve_target_by_pid(
             resp->image_size  = 0;
             resp->reserved    = 0;
             resp->status      = OPHION_STATUS_OK;
+            UINT64 pcl_flags = VmmSpinAcquire(&g_proc_cache_lock);
             s->target_pid          = (UINT32)pid;
             s->target_image_base   = base;
             s->target_cr3          = dtb;
+            VmmSpinRelease(&g_proc_cache_lock, pcl_flags);
             return OPHION_STATUS_OK;
         }
         UINT64 next = vmm_guest_read64(caller_cr3, cur);
@@ -704,6 +715,71 @@ handle_list_modules(
     return OPHION_STATUS_OK;
 }
 
+//
+// Step #8 (Grill Q21-C): drain VMM per-CPU vmexit log into caller's pool.
+// Caller is expected to be the Ophion driver running in system context;
+// caller_cr3 == system_cr3 so vmm_guest_write resolves out_buf_va via the
+// driver's pool mapping. Magic + per-CPU layout described in OphionAbi.h.
+//
+static UINT32
+handle_get_percpu_log(
+    IN  ophion_session_t                 *s,
+    IN  ophion_get_percpu_log_req_t      *req,
+    OUT ophion_get_percpu_log_resp_t     *resp,
+    IN  UINT64                            caller_cr3
+    )
+{
+    if (!s || !req || !resp) return OPHION_STATUS_INVALID_ARG;
+
+    resp->magic           = 0;
+    resp->bytes_written   = 0;
+    resp->cpu_count       = 0;
+    resp->records_per_cpu = 0;
+
+    if (req->out_buf_va == 0 || req->out_buf_size == 0) {
+        resp->status = OPHION_STATUS_INVALID_ARG;
+        return OPHION_STATUS_INVALID_ARG;
+    }
+
+    UINTN need = VmmPclRequiredSize();
+    if (need == 0) {
+        resp->status = OPHION_STATUS_NOT_REGISTERED;
+        return OPHION_STATUS_NOT_REGISTERED;
+    }
+    if (need > req->out_buf_size) {
+        resp->status = OPHION_STATUS_INVALID_ARG;
+        return OPHION_STATUS_INVALID_ARG;
+    }
+
+    // Static scratch sized to the 12-thread Alder Lake target plus headroom
+    // (24 cores * 1032 + 16 = 24784 < 32768). Avoids large stack frames in
+    // VMX-root context where the host stack is small.
+    static UINT8 sn_scratch[32768];
+    if (need > sizeof(sn_scratch)) {
+        resp->status = OPHION_STATUS_INVALID_ARG;
+        return OPHION_STATUS_INVALID_ARG;
+    }
+    UINTN got = VmmPclSnapshot(sn_scratch, sizeof(sn_scratch));
+    if (got == 0 || got != need) {
+        resp->status = OPHION_STATUS_READ_FAILED;
+        return OPHION_STATUS_READ_FAILED;
+    }
+
+    UINTN put = vmm_guest_write(caller_cr3, req->out_buf_va, sn_scratch, got);
+    if (put != got) {
+        resp->status = OPHION_STATUS_WRITE_FAILED;
+        return OPHION_STATUS_WRITE_FAILED;
+    }
+
+    // Snapshot blob layout: [magic u64][cpu_count u32][rec_per_cpu u32]...
+    resp->magic           = VMM_PCL_MAGIC;
+    resp->bytes_written   = (UINT32)got;
+    resp->cpu_count       = *(UINT32 *)(sn_scratch + sizeof(UINT64));
+    resp->records_per_cpu = VMM_PCL_RECORDS_PER_CPU;
+    resp->status          = OPHION_STATUS_OK;
+    return OPHION_STATUS_OK;
+}
+
 static UINT32
 handle_status_query(
     OUT ophion_status_resp_t *resp
@@ -869,9 +945,23 @@ VmcallDispatch(
             return OPHION_STATUS_INVALID_ARG;
         return handle_set_kernel_offsets((ophion_kernel_offsets_t *)caller_buf);
     }
-    case OPHION_OP_UNREGISTER:
+    case OPHION_OP_GET_PERCPU_LOG: {
+        if (caller_buf_size < (sizeof(ophion_get_percpu_log_req_t) +
+                               sizeof(ophion_get_percpu_log_resp_t)))
+            return OPHION_STATUS_INVALID_ARG;
+        ophion_get_percpu_log_req_t  *req  =
+            (ophion_get_percpu_log_req_t  *)caller_buf;
+        ophion_get_percpu_log_resp_t *resp =
+            (ophion_get_percpu_log_resp_t *)
+            ((UINT8 *)caller_buf + sizeof(ophion_get_percpu_log_req_t));
+        return handle_get_percpu_log(s, req, resp, caller_cr3);
+    }
+    case OPHION_OP_UNREGISTER: {
+        UINT64 unreg_flags = VmmSpinAcquire(&g_session_lock);
         ZeroMem(s, sizeof(*s));
+        VmmSpinRelease(&g_session_lock, unreg_flags);
         return OPHION_STATUS_OK;
+    }
     default:
         return OPHION_STATUS_INVALID_ARG;
     }
