@@ -3,7 +3,7 @@
 //! Architecture:
 //!   main -> hv_pipe::register   (auth handshake via VMCALL)
 //!        -> hv_pipe::resolve_target("TslGame.exe")
-//!        -> sdk::offsets::fetch (external dumper or cached)
+//!        -> sdk::PubgOffsets::for_build(env override or DEFAULT_BUILD)
 //!        -> overlay::run         (DX11 ImGui, calls features::tick each frame)
 
 use anyhow::{Context, Result};
@@ -27,8 +27,15 @@ fn main() -> Result<()> {
         target.size
     );
 
-    let offsets = sdk::offsets::fetch().context("offset fetch failed")?;
-    log::info!("offsets loaded: build={}", offsets.build_id);
+    // Build override via PUBG_BUILD env var; otherwise pick DEFAULT_BUILD.
+    let build = std::env::var("PUBG_BUILD").ok();
+    let offsets = sdk::PubgOffsets::for_build(build.as_deref())
+        .context("offset load failed")?;
+    log::info!(
+        "offsets loaded: build={} uworld_rva=0x{:x}",
+        offsets.build_id,
+        offsets.uworld_rva
+    );
 
     overlay::run(session, target, offsets)?;
 
