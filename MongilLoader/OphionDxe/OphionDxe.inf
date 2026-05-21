@@ -25,6 +25,7 @@
   VmmHostIdt.c
   VmmExit.c
   VmmMp.c
+  ApInit.c
   VmmGuestPt.c
   VmmResolveNtos.c
   VmmInstall.c

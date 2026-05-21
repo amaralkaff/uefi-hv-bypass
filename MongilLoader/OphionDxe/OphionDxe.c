@@ -40,6 +40,9 @@ extern EFI_STATUS VmmMpDispatchTest(VOID);
 extern EFI_STATUS VmmMpVmxSmokeAll(VOID);
 extern EFI_STATUS VmmMpTscAuxTest(VOID);
 extern EFI_STATUS VmmMpVirtualizeOne(UINTN processor_num);
+extern EFI_STATUS ApInitVirtualizeAll(VOID);
+extern UINT32     ApInitAttempted(VOID);
+extern UINT64     ApInitArmedMask(VOID);
 extern UINT64 vmm_pt_walk(UINT64 cr3, UINT64 va);
 extern UINTN  vmm_guest_read(UINT64 cr3, UINT64 va, VOID *dst, UINTN size);
 extern BOOLEAN ept_preallocate_pools(VOID);
@@ -238,6 +241,17 @@ OphionDxeEntry(
         // MongilLoader/build/Phase_3_partial_known_good/. Re-enable only
         // on bench HW with serial console + working VMCALL readback.
         // VmmMpVirtualizeOne(1);
+
+        // Step #B1 (Grill Q19-A): multi-AP virtualize entry. Linked but NOT
+        // called — same blocker as Phase 3d-iv-b above. ApInitVirtualizeAll
+        // would walk every enabled AP through VmmMpVirtualizeOne with the
+        // s_ap_armed[] retry guard, but Step #B2 (SIPI/INIT exit handler)
+        // must land first or Windows freezes during multi-core wake. Force
+        // -link so the linker doesn't dead-strip the entry; bench HW with
+        // serial console can flip it on once Step #B2 is verified.
+        if ((UINTN)ApInitVirtualizeAll == 0) Print(L"unreachable\n");
+        if ((UINTN)ApInitAttempted == 0)     Print(L"unreachable\n");
+        if ((UINTN)ApInitArmedMask == 0)     Print(L"unreachable\n");
     }
 
     Status = gBS->CreateEventEx(EVT_NOTIFY_SIGNAL,
