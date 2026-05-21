@@ -6,12 +6,8 @@
 //!        -> sdk::offsets::fetch (external dumper or cached)
 //!        -> overlay::run         (DX11 ImGui, calls features::tick each frame)
 
-mod hv_pipe;
-mod overlay;
-mod sdk;
-mod features;
-
 use anyhow::{Context, Result};
+use pubg_external::{hv_pipe, overlay, sdk};
 
 fn main() -> Result<()> {
     env_logger::init();
@@ -24,7 +20,12 @@ fn main() -> Result<()> {
 
     let target = hv_pipe::resolve_target(&session, "TslGame.exe")
         .context("PUBG process not found")?;
-    log::info!("target pid={} base={:#x} size={:#x}", target.pid, target.base, target.size);
+    log::info!(
+        "target pid={} base={:#x} size={:#x}",
+        target.pid,
+        target.base,
+        target.size
+    );
 
     let offsets = sdk::offsets::fetch().context("offset fetch failed")?;
     log::info!("offsets loaded: build={}", offsets.build_id);
