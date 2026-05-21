@@ -1,0 +1,28 @@
+uefi-hv-bypass
+==============
+
+Third-party attribution.
+
+Ophion/
+-------
+Originally derived from https://github.com/zer0condition/Ophion (MIT-style
+license preserved in Ophion/LICENSE). Imported via the amaralkaff/Ophion fork
+at commit 7b501992bd71af7f5330ec697a1cbe27921157f9 plus local divergence
+covering: xhunter1 hook integration, VMM logger, EPT cloak (Phase 7d), and the
+UEFI VMM port hooks consumed by MongilLoader/OphionDxe.
+
+Going forward, driver source under Ophion/ is maintained directly in this
+repository alongside MongilLoader/OphionDxe so that VMCALL ABI changes
+(MongilLoader/include/OphionAbi.h <-> Ophion/include/hv_types.h) land in a
+single atomic commit.
+
+EfiGuard
+--------
+Pre-built binaries under .tools/EfiGuard-v1.4 are unmodified releases from
+https://github.com/Mattiwatti/EfiGuard, used at boot for PatchGuard and DSE
+bypass. Source not redistributed; see upstream for license.
+
+EDK II
+------
+The edk2/ tree is gitignored and provided locally as the UEFI build
+environment. See https://github.com/tianocore/edk2 for license.
