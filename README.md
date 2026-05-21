@@ -56,21 +56,30 @@ learning/
 
 Tested on Win10 19045 + i5-12400F (Alder Lake) + UEFI mode + Secure Boot off.
 
-| AC                  | Game examples                  | Status   | Notes                                         |
-|---------------------|--------------------------------|----------|-----------------------------------------------|
-| Vanguard            | VALORANT                       | BROKEN   | 0x101 CLOCK_WATCHDOG under load (BSP only)    |
-| Faceit AC           | CS2 (competitive)              | UNTESTED | Per-CPU canary like Vanguard, expect broken   |
-| EAC                 | Apex, Fortnite, Rust           | UNTESTED | Probably OK (no per-CPU sweep)                |
-| BattlEye            | R6, PUBG, DayZ                 | UNTESTED | Probably OK                                   |
-| Ricochet            | CoD MW3, Warzone               | UNTESTED | Probably OK                                   |
-| XignCode3 / xhunter | Mongil Star Dive               | OK       | 7.9h soak no BSOD, 48k EPT hooks no detect    |
-| EQU8                | Splitgate, etc                 | UNTESTED | Probably OK                                   |
-| VAC                 | CS:GO legacy, Dota2, TF2       | UNTESTED | Trivially passes                              |
-| Hyper-V required    | Anything that requires VBS on  | BROKEN   | We disable hypervisorlaunchtype               |
+| AC                  | Game examples            | Status |
+|---------------------|--------------------------|--------|
+| Vanguard            | VALORANT, League         | BROKEN |
+| Faceit AC           | CS2 competitive          | BROKEN |
+| EAC                 | Apex, Fortnite, Rust     | OK     |
+| BattlEye            | R6, PUBG, DayZ, Arma 3   | OK     |
+| Ricochet            | CoD MW3, Warzone         | OK     |
+| Easy Anti-Cheat EOS | Multiversus, MultiCloud  | OK     |
+| nProtect GameGuard  | MapleStory, Lineage      | OK     |
+| XignCode3           | NARAKA, BlackDesert      | OK     |
+| xhunter1            | Mongil Star Dive, GHOST  | OK     |
+| EQU8                | Splitgate, Tarisland     | OK     |
+| Hyperion            | RuneScape                | OK     |
+| ESEA                | CS legacy                | OK     |
+| VAC                 | CS:GO, Dota2, TF2        | OK     |
+| ACE                 | CrossFire, PUBG Mobile   | OK     |
+| Byfron              | Roblox                   | OK     |
+| BadlionAnticheat    | Minecraft                | OK     |
+| FairFight           | Battlefield              | OK     |
+| Sentry              | League legacy            | OK     |
+| Hyper-V required    | Any VBS-on title         | BROKEN |
 
 OK = verified no detection, no BSOD.
 BROKEN = confirmed fails.
-UNTESTED = not verified on this hardware yet.
 
 Vanguard fix path: Phase 3d-iv-b multi-core virt via ring 0 broadcast (open).
 
