@@ -409,6 +409,19 @@ vmexit_handler(IN GUEST_REGS *regs, IN VIRTUAL_MACHINE_STATE *vcpu)
         // instruction length is undefined for INIT.
         // No NV writes from AP vmexit context (post-EBS SetVariable on AP
         // races NT's own var usage → undefined → 100% CPU thrash).
+        //
+        // Step #B2 defensive: drop any stale cloak walk-back state. An AP
+        // taking INIT from Windows multiproc-wake while mid-MTF (extremely
+        // unlikely but possible if BSP cloak walk preempts on this core)
+        // would otherwise resume the wrong PML1 swap on next vmresume. Clear
+        // the MTF ctrl bit and the per-vcpu pending restore so a fresh
+        // SIPI-driven real-mode entry is fully clean.
+        if (vcpu->mtf_pending_restore) {
+            ept_clear_mtf();
+            vcpu->mtf_pending_restore = FALSE;
+            vcpu->mtf_pml1            = NULL;
+            vcpu->mtf_alt_pfn         = 0;
+        }
         __vmx_vmwrite(VMCS_GUEST_ACTIVITY_STATE, 3);
         vcpu->init_seen++;
         vcpu->advance_rip = FALSE;
@@ -500,6 +513,17 @@ vmexit_handler(IN GUEST_REGS *regs, IN VIRTUAL_MACHINE_STATE *vcpu)
 
         // Activity state Active (0).
         __vmx_vmwrite(VMCS_GUEST_ACTIVITY_STATE, 0);
+
+        // Step #B2 defensive: same MTF guard as INIT_SIGNAL — a SIPI tearing
+        // an AP back to real-mode while a cloak walk-back is mid-step would
+        // resume into a stale PML1 mapping. Clear before activity-state goes
+        // Active so the first guest fetch on this AP is clean.
+        if (vcpu->mtf_pending_restore) {
+            ept_clear_mtf();
+            vcpu->mtf_pending_restore = FALSE;
+            vcpu->mtf_pml1            = NULL;
+            vcpu->mtf_alt_pfn         = 0;
+        }
 
         // Per-vcpu in-memory log only (no NV write from AP vmexit context).
         vcpu->sipi_seen++;

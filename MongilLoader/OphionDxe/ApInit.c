@@ -225,3 +225,72 @@ UINT32 ApInitFailCount(VOID)    { return g_ap_fail;    }
 UINT32 ApInitErrCount(VOID)     { return g_ap_err;     }
 UINT64 ApInitOkMask(VOID)       { return g_ap_ok_mask; }
 UINT64 ApInitFailMask(VOID)     { return g_ap_fail_mask; }
+
+/*
+ * Step #B2 telemetry: snapshot per-AP SIPI / INIT counters from the per-vcpu
+ * state populated by VmmExit.c. Caller is BSP-only post-virt; we cannot write
+ * NV vars from AP vmexit context (race with NT). Returns the number of CPUs
+ * the snapshot covered (= min(g_cpu_count, max)).
+ *
+ * out_sipi[i] : count of SIPI vmexits CPU i has handled
+ * out_init[i] : count of INIT_SIGNAL vmexits CPU i has handled
+ * out_last_vec[i] : low byte of the most recent SIPI vector observed by CPU i
+ *
+ * Slots beyond g_cpu_count are zeroed so callers can format a fixed-width
+ * table without bounds dancing.
+ */
+UINTN
+ApInitSipiSnapshot(
+    OUT UINT32 *out_sipi,
+    OUT UINT32 *out_init,
+    OUT UINT16 *out_last_vec,
+    IN  UINTN  max
+    )
+{
+    if (g_vcpu == NULL || max == 0) return 0;
+    UINTN n = (g_cpu_count < max) ? g_cpu_count : max;
+    for (UINTN i = 0; i < n; i++) {
+        if (out_sipi)     out_sipi[i]     = g_vcpu[i].sipi_seen;
+        if (out_init)     out_init[i]     = g_vcpu[i].init_seen;
+        if (out_last_vec) out_last_vec[i] = (UINT16)g_vcpu[i].last_sipi_vec;
+    }
+    for (UINTN i = n; i < max; i++) {
+        if (out_sipi)     out_sipi[i]     = 0;
+        if (out_init)     out_init[i]     = 0;
+        if (out_last_vec) out_last_vec[i] = 0;
+    }
+    return n;
+}
+
+/*
+ * BSP-side helper: aggregate ApInitSipiSnapshot into a single OphnApSipi NV
+ * variable for post-boot inspection via read_ophn_log.ps1.
+ *
+ * Called only from BSP, only pre-EBS (gRT->SetVariable post-EBS is unreliable
+ * from VMX root). The natural caller is the same DXE entry path that drives
+ * ApInitVirtualizeAll, AFTER Step #B2 SIPI handlers have processed initial
+ * AP wake from MP-services start-up. Today both ApInitVirtualizeAll and this
+ * flush are force-linked but not invoked at DXE entry — flipping them on is
+ * a Step #B4 stress-harness milestone.
+ */
+VOID
+ApInitFlushSipiToNv(VOID)
+{
+    if (g_vcpu == NULL || g_cpu_count == 0) {
+        VmmLogVarSet(L"OphnApSipi", "no_vcpu");
+        return;
+    }
+
+    UINT32 total_sipi = 0, total_init = 0;
+    UINTN  n = (g_cpu_count < APINIT_MAX_CPUS) ? g_cpu_count : APINIT_MAX_CPUS;
+    for (UINTN i = 0; i < n; i++) {
+        total_sipi += g_vcpu[i].sipi_seen;
+        total_init += g_vcpu[i].init_seen;
+    }
+
+    VmmLogVarSetf(L"OphnApSipi",
+                  "cpus=%u total_sipi=%u total_init=%u "
+                  "ok_mask=0x%llx fail_mask=0x%llx",
+                  (UINT32)n, total_sipi, total_init,
+                  g_ap_ok_mask, g_ap_fail_mask);
+}

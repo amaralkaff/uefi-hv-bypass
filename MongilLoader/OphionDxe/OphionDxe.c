@@ -43,6 +43,9 @@ extern EFI_STATUS VmmMpVirtualizeOne(UINTN processor_num);
 extern EFI_STATUS ApInitVirtualizeAll(VOID);
 extern UINT32     ApInitAttempted(VOID);
 extern UINT64     ApInitArmedMask(VOID);
+extern UINTN      ApInitSipiSnapshot(UINT32 *out_sipi, UINT32 *out_init,
+                                     UINT16 *out_last_vec, UINTN max);
+extern VOID       ApInitFlushSipiToNv(VOID);
 extern UINT64 vmm_pt_walk(UINT64 cr3, UINT64 va);
 extern UINTN  vmm_guest_read(UINT64 cr3, UINT64 va, VOID *dst, UINTN size);
 extern BOOLEAN ept_preallocate_pools(VOID);
@@ -252,6 +255,8 @@ OphionDxeEntry(
         if ((UINTN)ApInitVirtualizeAll == 0) Print(L"unreachable\n");
         if ((UINTN)ApInitAttempted == 0)     Print(L"unreachable\n");
         if ((UINTN)ApInitArmedMask == 0)     Print(L"unreachable\n");
+        if ((UINTN)ApInitSipiSnapshot == 0)  Print(L"unreachable\n");
+        if ((UINTN)ApInitFlushSipiToNv == 0) Print(L"unreachable\n");
     }
 
     Status = gBS->CreateEventEx(EVT_NOTIFY_SIGNAL,
