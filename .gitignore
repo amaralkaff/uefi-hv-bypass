@@ -101,3 +101,6 @@ secrets/
 pubg_external/target/
 pubg_external/Cargo.lock
 
+
+# Local IDE/tooling settings — not part of project
+.kiro/
