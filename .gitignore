@@ -96,3 +96,8 @@ secrets/
 !MongilLoader/build/Loader.efi
 !MongilLoader/build/LoaderNoGuard.efi
 !MongilLoader/build/OphionDxe.efi
+
+# pubg_external Rust target dir
+pubg_external/target/
+pubg_external/Cargo.lock
+
