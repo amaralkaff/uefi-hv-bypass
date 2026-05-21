@@ -2,37 +2,6 @@
 
 > **Proof of Concept.** UEFI VT-x hypervisor + EfiGuard PG/DSE bypass. Research only.
 
-## Anti-cheat compatibility
-
-Tested on Win10 19045 + i5-12400F (Alder Lake) + UEFI mode + Secure Boot off.
-
-| AC                  | Game examples            | Status |
-|---------------------|--------------------------|--------|
-| Vanguard            | VALORANT, League         | BROKEN |
-| Faceit AC           | CS2 competitive          | BROKEN |
-| EAC                 | Apex, Fortnite, Rust     | OK     |
-| BattlEye            | R6, PUBG, DayZ, Arma 3   | OK     |
-| Ricochet            | CoD MW3, Warzone         | OK     |
-| Easy Anti-Cheat EOS | Multiversus, MultiCloud  | OK     |
-| nProtect GameGuard  | MapleStory, Lineage      | OK     |
-| XignCode3           | NARAKA, BlackDesert      | OK     |
-| xhunter1            | Mongil Star Dive, GHOST  | OK     |
-| EQU8                | Splitgate, Tarisland     | OK     |
-| Hyperion            | RuneScape                | OK     |
-| ESEA                | CS legacy                | OK     |
-| VAC                 | CS:GO, Dota2, TF2        | OK     |
-| ACE                 | CrossFire, PUBG Mobile   | OK     |
-| Byfron              | Roblox                   | OK     |
-| BadlionAnticheat    | Minecraft                | OK     |
-| FairFight           | Battlefield              | OK     |
-| Sentry              | League legacy            | OK     |
-| Hyper-V required    | Any VBS-on title         | BROKEN |
-
-OK = verified no detection, no BSOD.
-BROKEN = confirmed fails.
-
-Vanguard fix path: Phase 3d-iv-b multi-core virt via ring 0 broadcast (open).
-
 ## Layout
 
 ```
