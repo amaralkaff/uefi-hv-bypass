@@ -5,20 +5,53 @@
 *   Step #3 (Grill Q6-B): per-FILE_OBJECT session in FsContext
 *   Step #3 (Grill Q1/Q2/Q8): relay worker + trampoline VA discovery
 *   Step #4 (Grill Q3-B): IOCTL_HV_REGISTER typed IOCTL
+*   Step #5: IOCTL_HV_RESOLVE + IOCTL_HV_UNREGISTER + cleanup VMCALL
 */
 #include "hv.h"
 #include "relay.h"
 #include "OphionAbi.h"
 
 #define IOCTL_BASE      0x800
-#define IOCTL_HV_STATUS    CTL_CODE(FILE_DEVICE_UNKNOWN, IOCTL_BASE + 0, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define IOCTL_HV_GET_LOG   CTL_CODE(FILE_DEVICE_UNKNOWN, IOCTL_BASE + 1, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define IOCTL_HV_REGISTER  CTL_CODE(FILE_DEVICE_UNKNOWN, IOCTL_BASE + 2, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_HV_STATUS     CTL_CODE(FILE_DEVICE_UNKNOWN, IOCTL_BASE + 0, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_HV_GET_LOG    CTL_CODE(FILE_DEVICE_UNKNOWN, IOCTL_BASE + 1, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_HV_REGISTER   CTL_CODE(FILE_DEVICE_UNKNOWN, IOCTL_BASE + 2, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_HV_RESOLVE    CTL_CODE(FILE_DEVICE_UNKNOWN, IOCTL_BASE + 3, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_HV_UNREGISTER CTL_CODE(FILE_DEVICE_UNKNOWN, IOCTL_BASE + 4, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
 static NTSTATUS DriverCreate(PDEVICE_OBJECT device_obj, PIRP irp);
 static NTSTATUS DriverCleanup(PDEVICE_OBJECT device_obj, PIRP irp);
 static NTSTATUS DriverClose(PDEVICE_OBJECT device_obj, PIRP irp);
 static NTSTATUS DriverIoControl(PDEVICE_OBJECT device_obj, PIRP irp);
+
+static NTSTATUS
+SessionVmcallUnregister(_In_ POPHION_SESSION session)
+{
+    if (!session || !session->registered || session->session_key == 0)
+    {
+        return STATUS_INVALID_DEVICE_STATE;
+    }
+    if (!relay_is_armed())
+    {
+        return STATUS_DEVICE_NOT_READY;
+    }
+
+    OPHION_RELAY_REQ req = {0};
+    req.session     = session;
+    req.op          = OPHION_OP_UNREGISTER;
+    req.in_buf      = NULL;
+    req.in_size     = 0;
+    req.out_buf     = NULL;
+    req.out_size    = 0;
+    req.attach_proc = session->owner_proc;
+
+    NTSTATUS rs = relay_submit(&req);
+    if (NT_SUCCESS(rs) && req.out_rax == OPHION_STATUS_OK)
+    {
+        session->registered  = FALSE;
+        session->session_key = 0;
+    }
+    return rs;
+}
 
 VOID
 DriverUnload(_In_ PDRIVER_OBJECT driver_obj)
@@ -144,7 +177,10 @@ DriverCleanup(
 
     if (session)
     {
-        // Future step #4+: if session->registered, issue UNREGISTER VMCALL here
+        if (session->registered)
+        {
+            (VOID)SessionVmcallUnregister(session);
+        }
         relay_session_free(session);
         sl->FileObject->FsContext = NULL;
     }
@@ -281,6 +317,101 @@ DriverIoControl(
         irp->IoStatus.Information = sizeof(ophion_register_resp_t);
 
         ExFreePoolWithTag(pool, OPHION_RELAY_TAG);
+        break;
+    }
+
+    case IOCTL_HV_RESOLVE:
+    {
+        ULONG in_len  = io_stack->Parameters.DeviceIoControl.InputBufferLength;
+        ULONG out_len = io_stack->Parameters.DeviceIoControl.OutputBufferLength;
+
+        if (in_len < sizeof(ophion_resolve_req_t) ||
+            out_len < sizeof(ophion_resolve_resp_t))
+        {
+            status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+
+        POPHION_SESSION session = (POPHION_SESSION)io_stack->FileObject->FsContext;
+        if (!session)
+        {
+            status = STATUS_INVALID_HANDLE;
+            break;
+        }
+        if (!session->registered)
+        {
+            status = STATUS_INVALID_DEVICE_STATE;
+            break;
+        }
+        if (!relay_is_armed())
+        {
+            status = STATUS_DEVICE_NOT_READY;
+            break;
+        }
+
+        SIZE_T pool_size = sizeof(ophion_resolve_req_t) +
+                           sizeof(ophion_resolve_resp_t);
+        PVOID  pool      = ExAllocatePool2(POOL_FLAG_NON_PAGED, pool_size,
+                                           OPHION_RELAY_TAG);
+        if (!pool)
+        {
+            status = STATUS_INSUFFICIENT_RESOURCES;
+            break;
+        }
+
+        RtlCopyMemory(pool, irp->AssociatedIrp.SystemBuffer,
+                      sizeof(ophion_resolve_req_t));
+        RtlZeroMemory((PUCHAR)pool + sizeof(ophion_resolve_req_t),
+                      sizeof(ophion_resolve_resp_t));
+
+        OPHION_RELAY_REQ req = {0};
+        req.session     = session;
+        req.op          = OPHION_OP_RESOLVE_TARGET;
+        req.in_buf      = pool;
+        req.in_size     = (UINT32)pool_size;
+        req.out_buf     = pool;
+        req.out_size    = (UINT32)pool_size;
+        req.attach_proc = session->owner_proc;
+
+        NTSTATUS rs = relay_submit(&req);
+        if (!NT_SUCCESS(rs))
+        {
+            ExFreePoolWithTag(pool, OPHION_RELAY_TAG);
+            status = rs;
+            break;
+        }
+
+        ophion_resolve_resp_t *resp = (ophion_resolve_resp_t *)
+            ((PUCHAR)pool + sizeof(ophion_resolve_req_t));
+
+        if (resp->status == OPHION_STATUS_OK && resp->target_pid != 0)
+        {
+            session->target_pid = resp->target_pid;
+        }
+
+        RtlCopyMemory(irp->AssociatedIrp.SystemBuffer, resp,
+                      sizeof(ophion_resolve_resp_t));
+        irp->IoStatus.Information = sizeof(ophion_resolve_resp_t);
+
+        ExFreePoolWithTag(pool, OPHION_RELAY_TAG);
+        break;
+    }
+
+    case IOCTL_HV_UNREGISTER:
+    {
+        POPHION_SESSION session = (POPHION_SESSION)io_stack->FileObject->FsContext;
+        if (!session)
+        {
+            status = STATUS_INVALID_HANDLE;
+            break;
+        }
+        if (!session->registered)
+        {
+            status = STATUS_INVALID_DEVICE_STATE;
+            break;
+        }
+        status = SessionVmcallUnregister(session);
+        irp->IoStatus.Information = 0;
         break;
     }
 
