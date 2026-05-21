@@ -46,6 +46,9 @@
     <ClCompile Include="src\xhunter_hook.c">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="src\relay.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
 
   <ItemGroup>
@@ -67,6 +70,9 @@
     <ClInclude Include="include\xhunter_hook.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="include\relay.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
 
   <ItemGroup>
@@ -86,6 +92,9 @@
       <Filter>Assembly Files</Filter>
     </MASM>
     <MASM Include="asm\AsmVmxIntrinsics.asm">
+      <Filter>Assembly Files</Filter>
+    </MASM>
+    <MASM Include="asm\AsmRelayCall.asm">
       <Filter>Assembly Files</Filter>
     </MASM>
   </ItemGroup>

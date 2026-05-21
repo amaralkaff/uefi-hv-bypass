@@ -1,32 +1,31 @@
 /*
 *   driver.c - windows kernel driver entry point for the hypervisor
-*   creates a device object, symbolic link, and initializes vmx
-*   provides ioctl interface for usermode loader communication
+*   creates a device object and initializes vmx
+*   Step #3 (Grill Q9-C): obscure device name, no DosDevices symlink
+*   Step #3 (Grill Q6-B): per-FILE_OBJECT session in FsContext
+*   Step #3 (Grill Q1/Q2/Q8): relay worker + trampoline VA discovery
 */
 #include "hv.h"
-
-#define DEVICE_NAME     L"\\Device\\Ophion"
-#define SYMLINK_NAME    L"\\DosDevices\\Ophion"
+#include "relay.h"
 
 #define IOCTL_BASE      0x800
 #define IOCTL_HV_STATUS  CTL_CODE(FILE_DEVICE_UNKNOWN, IOCTL_BASE + 0, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define IOCTL_HV_GET_LOG CTL_CODE(FILE_DEVICE_UNKNOWN, IOCTL_BASE + 1, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
-static NTSTATUS DriverCreateClose(PDEVICE_OBJECT device_obj, PIRP irp);
+static NTSTATUS DriverCreate(PDEVICE_OBJECT device_obj, PIRP irp);
+static NTSTATUS DriverCleanup(PDEVICE_OBJECT device_obj, PIRP irp);
+static NTSTATUS DriverClose(PDEVICE_OBJECT device_obj, PIRP irp);
 static NTSTATUS DriverIoControl(PDEVICE_OBJECT device_obj, PIRP irp);
 
 VOID
 DriverUnload(_In_ PDRIVER_OBJECT driver_obj)
 {
-    UNICODE_STRING symlink;
-
     hv_log("[hv] Unloading hypervisor driver...\n");
+
+    relay_shutdown();
 
     broadcast_terminate_all();
     vmx_terminate();
-
-    RtlInitUnicodeString(&symlink, SYMLINK_NAME);
-    IoDeleteSymbolicLink(&symlink);
 
     if (driver_obj->DeviceObject)
     {
@@ -44,14 +43,13 @@ DriverEntry(
     NTSTATUS       status;
     PDEVICE_OBJECT device_obj = NULL;
     UNICODE_STRING device_name;
-    UNICODE_STRING symlink;
 
     UNREFERENCED_PARAMETER(registry_path);
 
     hv_log_init();
     hv_log("[hv] Ophion initializing...\n");
 
-    RtlInitUnicodeString(&device_name, DEVICE_NAME);
+    RtlInitUnicodeString(&device_name, OPHION_DEVICE_NAME);
     status = IoCreateDevice(
         driver_obj,
         0,
@@ -67,28 +65,37 @@ DriverEntry(
         return status;
     }
 
-    RtlInitUnicodeString(&symlink, SYMLINK_NAME);
-    status = IoCreateSymbolicLink(&symlink, &device_name);
-
-    if (!NT_SUCCESS(status))
-    {
-        hv_log("[hv] IoCreateSymbolicLink failed: 0x%X\n", status);
-        IoDeleteDevice(device_obj);
-        return status;
-    }
-
     driver_obj->DriverUnload                         = DriverUnload;
-    driver_obj->MajorFunction[IRP_MJ_CREATE]         = DriverCreateClose;
-    driver_obj->MajorFunction[IRP_MJ_CLOSE]          = DriverCreateClose;
+    driver_obj->MajorFunction[IRP_MJ_CREATE]         = DriverCreate;
+    driver_obj->MajorFunction[IRP_MJ_CLEANUP]        = DriverCleanup;
+    driver_obj->MajorFunction[IRP_MJ_CLOSE]          = DriverClose;
     driver_obj->MajorFunction[IRP_MJ_DEVICE_CONTROL] = DriverIoControl;
 
     if (!vmx_init())
     {
         hv_log("[hv] VMX initialization FAILED!\n");
-        vmx_terminate();  // clean up any partially-allocated resources
-        IoDeleteSymbolicLink(&symlink);
+        vmx_terminate();
         IoDeleteDevice(device_obj);
         return STATUS_HV_OPERATION_FAILED;
+    }
+
+    status = relay_init();
+    if (!NT_SUCCESS(status))
+    {
+        hv_log("[hv] relay_init failed: 0x%X (continuing without relay)\n", status);
+        // Non-fatal: VMM still works for status/log IOCTLs even if relay fails
+    }
+    else
+    {
+        UINT64 tramp = relay_get_trampoline_va();
+        if (tramp)
+        {
+            hv_log("[hv] relay armed, trampoline VA = 0x%llx\n", tramp);
+        }
+        else
+        {
+            hv_log("[hv] relay started but trampoline NOT discovered (VMM patch absent?)\n");
+        }
     }
 
     hv_log("[hv] Hypervisor loaded and active on all cores!\n");
@@ -96,7 +103,57 @@ DriverEntry(
 }
 
 static NTSTATUS
-DriverCreateClose(
+DriverCreate(
+    _In_ PDEVICE_OBJECT device_obj,
+    _In_ PIRP           irp)
+{
+    UNREFERENCED_PARAMETER(device_obj);
+
+    PIO_STACK_LOCATION sl = IoGetCurrentIrpStackLocation(irp);
+    POPHION_SESSION    session = relay_session_alloc();
+
+    NTSTATUS status;
+    if (session)
+    {
+        sl->FileObject->FsContext = session;
+        status = STATUS_SUCCESS;
+    }
+    else
+    {
+        status = STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    irp->IoStatus.Status      = status;
+    irp->IoStatus.Information = 0;
+    IoCompleteRequest(irp, IO_NO_INCREMENT);
+    return status;
+}
+
+static NTSTATUS
+DriverCleanup(
+    _In_ PDEVICE_OBJECT device_obj,
+    _In_ PIRP           irp)
+{
+    UNREFERENCED_PARAMETER(device_obj);
+
+    PIO_STACK_LOCATION sl = IoGetCurrentIrpStackLocation(irp);
+    POPHION_SESSION    session = (POPHION_SESSION)sl->FileObject->FsContext;
+
+    if (session)
+    {
+        // Future step #4+: if session->registered, issue UNREGISTER VMCALL here
+        relay_session_free(session);
+        sl->FileObject->FsContext = NULL;
+    }
+
+    irp->IoStatus.Status      = STATUS_SUCCESS;
+    irp->IoStatus.Information = 0;
+    IoCompleteRequest(irp, IO_NO_INCREMENT);
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS
+DriverClose(
     _In_ PDEVICE_OBJECT device_obj,
     _In_ PIRP           irp)
 {
@@ -126,9 +183,6 @@ DriverIoControl(
     {
     case IOCTL_HV_STATUS:
     {
-        //
-        // return basic status: number of virtualized cores
-        //
         if (io_stack->Parameters.DeviceIoControl.OutputBufferLength >= sizeof(UINT32))
         {
             *(UINT32 *)irp->AssociatedIrp.SystemBuffer = g_cpu_count;
@@ -150,9 +204,6 @@ DriverIoControl(
     }
 
     default:
-        //
-        // add more shi here later
-        //
         status = STATUS_INVALID_DEVICE_REQUEST;
         break;
     }

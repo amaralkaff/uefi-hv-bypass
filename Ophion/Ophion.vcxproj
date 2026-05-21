@@ -115,6 +115,7 @@
     <ClCompile Include="src\hostidt.c" />
     <ClCompile Include="src\hostgdt.c" />
     <ClCompile Include="src\logger.c" />
+    <ClCompile Include="src\relay.c" />
   </ItemGroup>
   <!-- Assembly Files (MASM x64) -->
   <ItemGroup>
@@ -125,6 +126,7 @@
     <MASM Include="asm\AsmVmexitHandler.asm" />
     <MASM Include="asm\AsmVmxIntrinsics.asm" />
     <MASM Include="asm\AsmHostIdt.asm" />
+    <MASM Include="asm\AsmRelayCall.asm" />
   </ItemGroup>
   <!-- Header Files -->
   <ItemGroup>
@@ -134,6 +136,7 @@
     <ClInclude Include="include\asm_prototypes.h" />
     <ClInclude Include="include\stealth.h" />
     <ClInclude Include="include\logger.h" />
+    <ClInclude Include="include\relay.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

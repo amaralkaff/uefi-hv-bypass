@@ -65,3 +65,13 @@ extern VOID asm_host_nmi_handler(VOID);
 extern VOID asm_host_df_handler(VOID);
 extern VOID asm_host_gp_handler(VOID);
 extern VOID asm_host_default_handler(VOID);
+
+//
+// trampoline tail-call (AsmRelayCall.asm) — Step #3 user->VMM bridge
+//
+extern UINT64 OphionRelayCallTrampoline(
+    UINT64 trampoline_va,
+    UINT64 session_key,
+    UINT64 op,
+    UINT64 buf_va,
+    UINT64 buf_size);
