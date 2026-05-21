@@ -58,6 +58,10 @@ Workflow: direct commits to `main`. No PRs. Atomic conventional commits per step
   - Driver `DriverEntry` calls cloak after `IoCreateDevice`
   - Unlink own `LDR_DATA_TABLE_ENTRY` from 3 lists
   - Wipe `MmUnloadedDrivers` entry, zero PE header in pool
+  - **Detection notes** (UC pages 943-952, May 2026):
+    - BattlEye CR3 pulse 5s after game start; cloak must hold across CR3 swaps
+    - `\\.\GLOBALROOT\Device\Beep` as covert IOCTL channel observed in 2026 cheats; consider attaching there instead of standalone device when Q9 stealth tightens
+    - EPT-MZ honeypot: AC reads addresses inside cloaked range; if shadow returns stripped MZ AC flags. Cloak must serve a *plausible* shadow page (zeroed PE header is fine; partial PE w/ wrong section names is not), not just block reads
 
 - [ ] **Step #B4** — 12-core stress harness
   - Run hv_smoke.exe + Cinebench/Prime95 in parallel for 30min
