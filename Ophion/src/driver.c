@@ -6,17 +6,19 @@
 *   Step #3 (Grill Q1/Q2/Q8): relay worker + trampoline VA discovery
 *   Step #4 (Grill Q3-B): IOCTL_HV_REGISTER typed IOCTL
 *   Step #5: IOCTL_HV_RESOLVE + IOCTL_HV_UNREGISTER + cleanup VMCALL
+*   Step #6 (Grill Q4-B/Q7-B): IOCTL_HV_READ_SCATTER METHOD_OUT_DIRECT, MDL system VA
 */
 #include "hv.h"
 #include "relay.h"
 #include "OphionAbi.h"
 
 #define IOCTL_BASE      0x800
-#define IOCTL_HV_STATUS     CTL_CODE(FILE_DEVICE_UNKNOWN, IOCTL_BASE + 0, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define IOCTL_HV_GET_LOG    CTL_CODE(FILE_DEVICE_UNKNOWN, IOCTL_BASE + 1, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define IOCTL_HV_REGISTER   CTL_CODE(FILE_DEVICE_UNKNOWN, IOCTL_BASE + 2, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define IOCTL_HV_RESOLVE    CTL_CODE(FILE_DEVICE_UNKNOWN, IOCTL_BASE + 3, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define IOCTL_HV_UNREGISTER CTL_CODE(FILE_DEVICE_UNKNOWN, IOCTL_BASE + 4, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_HV_STATUS       CTL_CODE(FILE_DEVICE_UNKNOWN, IOCTL_BASE + 0, METHOD_BUFFERED,   FILE_ANY_ACCESS)
+#define IOCTL_HV_GET_LOG      CTL_CODE(FILE_DEVICE_UNKNOWN, IOCTL_BASE + 1, METHOD_BUFFERED,   FILE_ANY_ACCESS)
+#define IOCTL_HV_REGISTER     CTL_CODE(FILE_DEVICE_UNKNOWN, IOCTL_BASE + 2, METHOD_BUFFERED,   FILE_ANY_ACCESS)
+#define IOCTL_HV_RESOLVE      CTL_CODE(FILE_DEVICE_UNKNOWN, IOCTL_BASE + 3, METHOD_BUFFERED,   FILE_ANY_ACCESS)
+#define IOCTL_HV_UNREGISTER   CTL_CODE(FILE_DEVICE_UNKNOWN, IOCTL_BASE + 4, METHOD_BUFFERED,   FILE_ANY_ACCESS)
+#define IOCTL_HV_READ_SCATTER CTL_CODE(FILE_DEVICE_UNKNOWN, IOCTL_BASE + 5, METHOD_OUT_DIRECT, FILE_ANY_ACCESS)
 
 static NTSTATUS DriverCreate(PDEVICE_OBJECT device_obj, PIRP irp);
 static NTSTATUS DriverCleanup(PDEVICE_OBJECT device_obj, PIRP irp);
@@ -412,6 +414,124 @@ DriverIoControl(
         }
         status = SessionVmcallUnregister(session);
         irp->IoStatus.Information = 0;
+        break;
+    }
+
+    case IOCTL_HV_READ_SCATTER:
+    {
+        // METHOD_OUT_DIRECT:
+        //   input  -> SystemBuffer  (ophion_read_scatter_req_t, full size)
+        //   output -> irp->MdlAddress (gathered results land here, len = OutputBufferLength)
+        ULONG in_len  = io_stack->Parameters.DeviceIoControl.InputBufferLength;
+        ULONG out_len = io_stack->Parameters.DeviceIoControl.OutputBufferLength;
+
+        if (in_len < sizeof(ophion_read_scatter_req_t))
+        {
+            status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+        if (!irp->MdlAddress || out_len == 0)
+        {
+            status = STATUS_INVALID_PARAMETER;
+            break;
+        }
+
+        POPHION_SESSION session = (POPHION_SESSION)io_stack->FileObject->FsContext;
+        if (!session)
+        {
+            status = STATUS_INVALID_HANDLE;
+            break;
+        }
+        if (!session->registered)
+        {
+            status = STATUS_INVALID_DEVICE_STATE;
+            break;
+        }
+        if (!relay_is_armed())
+        {
+            status = STATUS_DEVICE_NOT_READY;
+            break;
+        }
+
+        ophion_read_scatter_req_t *user_req =
+            (ophion_read_scatter_req_t *)irp->AssociatedIrp.SystemBuffer;
+        if (user_req->entry_count == 0 ||
+            user_req->entry_count > OPHION_READ_SCATTER_MAX_ENTRIES)
+        {
+            status = STATUS_INVALID_PARAMETER;
+            break;
+        }
+
+        PVOID gather_sysva = MmGetSystemAddressForMdlSafe(
+            irp->MdlAddress, NormalPagePriority | MdlMappingNoExecute);
+        if (!gather_sysva)
+        {
+            status = STATUS_INSUFFICIENT_RESOURCES;
+            break;
+        }
+
+        SIZE_T pool_size = sizeof(ophion_read_scatter_req_t) +
+                           sizeof(ophion_read_scatter_resp_t);
+        PVOID  pool      = ExAllocatePool2(POOL_FLAG_NON_PAGED, pool_size,
+                                           OPHION_RELAY_TAG);
+        if (!pool)
+        {
+            status = STATUS_INSUFFICIENT_RESOURCES;
+            break;
+        }
+
+        RtlCopyMemory(pool, user_req, sizeof(ophion_read_scatter_req_t));
+        RtlZeroMemory((PUCHAR)pool + sizeof(ophion_read_scatter_req_t),
+                      sizeof(ophion_read_scatter_resp_t));
+
+        // Replace user-supplied out_buf_va with MDL-pinned system VA (Q7-B).
+        // Cap out_buf_size to MDL byte count to bound VMM writes.
+        ophion_read_scatter_req_t *kreq = (ophion_read_scatter_req_t *)pool;
+        kreq->out_buf_va   = (UINT64)(ULONG_PTR)gather_sysva;
+        kreq->out_buf_size = out_len;
+
+        OPHION_RELAY_REQ req = {0};
+        req.session     = session;
+        req.op          = OPHION_OP_READ_SCATTER;
+        req.in_buf      = pool;
+        req.in_size     = (UINT32)pool_size;
+        req.out_buf     = pool;
+        req.out_size    = (UINT32)pool_size;
+        req.attach_proc = session->owner_proc;
+
+        NTSTATUS rs = relay_submit(&req);
+        if (!NT_SUCCESS(rs))
+        {
+            ExFreePoolWithTag(pool, OPHION_RELAY_TAG);
+            status = rs;
+            break;
+        }
+
+        ophion_read_scatter_resp_t *resp = (ophion_read_scatter_resp_t *)
+            ((PUCHAR)pool + sizeof(ophion_read_scatter_req_t));
+
+        // METHOD_OUT_DIRECT has no separate response channel beyond the gather
+        // buffer. Convention: driver writes the 16-byte ophion_read_scatter_resp_t
+        // at offset 0 of the gather buffer; caller-supplied entries must use
+        // out_offset >= sizeof(ophion_read_scatter_resp_t) (i.e. >= 16).
+        if (out_len >= sizeof(ophion_read_scatter_resp_t))
+        {
+            RtlCopyMemory(gather_sysva, resp, sizeof(ophion_read_scatter_resp_t));
+        }
+
+        irp->IoStatus.Information = (ULONG_PTR)resp->total_bytes +
+                                    sizeof(ophion_read_scatter_resp_t);
+
+        if (resp->status != OPHION_STATUS_OK)
+        {
+            status = STATUS_PARTIAL_COPY;
+        }
+        else
+        {
+            status = STATUS_SUCCESS;
+        }
+
+        ExFreePoolWithTag(pool, OPHION_RELAY_TAG);
         break;
     }
 
