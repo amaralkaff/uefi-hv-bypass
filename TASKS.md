@@ -45,10 +45,7 @@ Workflow: direct commits to `main`. No PRs. Atomic conventional commits per step
 
 - [ ] **Step #B1** — `3b44764` feat(vmm): multi-AP virtualize wrapper. `MongilLoader/OphionDxe/ApInit.c::ApInitVirtualizeAll` iterates every enabled AP except BSP through `VmmMpVirtualizeOne` w/ `s_ap_armed[NUM_CPU]` retry guard; aggregates ok/already/skip/fail/err counts + masks into `OphnApAll` NV var. Force-linked via `if ((UINTN)Sym==0) Print()` but **not invoked at DXE entry** — same blocker as Phase 3d-iv-b: Step #B2 SIPI/INIT handler must land first or Windows freezes on multi-core wake. VMM build green (`OphionDxe.efi` 109KB).
 
-- [ ] **Step #B2** — SIPI + INIT exit handler
-  - Handle exit reason 0x09 (INIT) and 0x0A (SIPI) in `VmExitHandler.c`
-  - Read SIPI vector from exit qual, write guest RIP/CS, VMRESUME
-  - Test: 12 cores all enter VMX root pre-EBS, Windows boots normally
+- [ ] **Step #B2** — `488a8e9` feat(vmm): SIPI/INIT MTF guard + AP wake telemetry. INIT_SIGNAL + SIPI exit handlers (real-mode segment setup, CR0/CR4 fixed-bit handling under unrestricted-guest, EFER LMA clear, IA32E_MODE_GUEST clear, activity state writes) were already implemented. Added: defensive MTF state clear on INIT/SIPI (cloak walk-back must not bleed across AP reset); `ApInitSipiSnapshot` accessor + `ApInitFlushSipiToNv` BSP-only writer for `OphnApSipi` NV var. Force-linked from `OphionDxe.c`. **Still gated:** `ApInitVirtualizeAll` not invoked from DXE entry; opt-in needs bench HW + serial console.
 
 - [ ] **Step #B3** — Phase 7d cloak re-light scoped to driver image (Q16-D)
   - New VMCALL op `OPHX_OP_CLOAK_RANGE`
