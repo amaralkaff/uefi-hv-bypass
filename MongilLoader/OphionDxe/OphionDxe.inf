@@ -1,0 +1,69 @@
+## @file
+#  OphionDxe - Ophion VMM as UEFI DXE driver
+##
+
+[Defines]
+  INF_VERSION                    = 0x00010005
+  BASE_NAME                      = OphionDxe
+  FILE_GUID                      = 6A8B7C5D-3E2F-4A1B-9D0C-1E2F3A4B5C6D
+  MODULE_TYPE                    = DXE_RUNTIME_DRIVER
+  VERSION_STRING                 = 0.3.0
+  ENTRY_POINT                    = OphionDxeEntry
+
+[Sources]
+  OphionDxe.c
+  VmmInit.c
+  VmmGlobals.c
+  VmmUtil.c
+  VmmLog.c
+  VmmLogVar.c
+  VmmEpt.c
+  VmmVmcs.c
+  VmmHostCr3.c
+  VmmHostGdt.c
+  VmmHostIdt.c
+  VmmExit.c
+  VmmMp.c
+  VmmGuestPt.c
+  VmmResolveNtos.c
+  VmmInstall.c
+  VmmSha256.c
+  KiServiceTable.c
+  NtosPatch.c
+  VmcsAutoMsr.c
+  EfiAlloc.c
+  VmcallHandler.c
+  EfiCompat.h
+  ia32.h
+  hv_types.h
+  asm/AsmCommon.asm
+  asm/AsmSegmentRegs.asm
+  asm/AsmVmxOperation.asm
+  asm/AsmVmxIntrinsics.asm
+  asm/AsmVmxContext.asm
+  asm/AsmVmexitHandler.asm
+  asm/AsmHostIdt.asm
+
+[Packages]
+  MdePkg/MdePkg.dec
+  MdeModulePkg/MdeModulePkg.dec
+
+[LibraryClasses]
+  UefiDriverEntryPoint
+  UefiLib
+  UefiBootServicesTableLib
+  UefiRuntimeServicesTableLib
+  MemoryAllocationLib
+  BaseMemoryLib
+  BaseLib
+  PrintLib
+
+[Protocols]
+  gEfiMpServiceProtocolGuid
+
+[Guids]
+  gEfiEventExitBootServicesGuid
+  gEfiEventVirtualAddressChangeGuid
+
+[Depex]
+  TRUE

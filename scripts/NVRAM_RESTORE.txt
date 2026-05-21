@@ -1,0 +1,3 @@
+# Original displayorder before recovery: EfiGuard only
+# Restore command (run AFTER EfiGuard works again):
+#   bcdedit /set '{fwbootmgr}' displayorder '{311ec363-3c3b-11f1-b1ec-00e04c6a389d}'

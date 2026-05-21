@@ -1,0 +1,98 @@
+# ============================================================================
+# Bulky / external trees (NOT part of project)
+# ============================================================================
+edk2/
+.tools/
+_archive/
+
+# ============================================================================
+# Personal / IDE
+# ============================================================================
+.claude/
+.codex/
+.vs/
+.vscode/
+*.user
+
+# ============================================================================
+# Build artifacts
+# ============================================================================
+*.obj
+*.lib
+*.pdb
+*.tlog
+*.ipdb
+*.iobj
+*.exp
+*.suo
+*.aps
+*.cache
+*.idb
+
+# CMake / Ninja
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+.ninja_deps
+.ninja_log
+build.ninja
+
+# Build dirs (per-project)
+Ophion/build/
+Ophion/build/**
+detect/vgk_replica/build/
+detect/vgk_replica/probe_drv/build/
+detect/ophn_resolve_probe/symsrv.dll
+detect/ophn_resolve_probe/*.pdb
+detect/checkhv_um
+detect/checkhv_um.exe
+detect/hvdetecc
+
+# MongilLoader EFI build trash
+MongilLoader/build/build.log
+MongilLoader/build/build.err
+MongilLoader/build/edk2_build.cmd
+
+# stray top-level
+*.dmp
+ophn_*.txt
+
+# ============================================================================
+# Probe / detection tool exes (regenerated; keep .c sources only)
+# ============================================================================
+detect/ophn_resolve_probe/*.exe
+detect/ophn_resolve_probe/*.obj
+detect/vgk_replica/probe_drv/*.exe
+detect/vgk_replica/probe_drv/*.obj
+detect/vgk_replica/bin/
+
+# ============================================================================
+# OS noise
+# ============================================================================
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# ============================================================================
+# Sensitive — never commit
+# ============================================================================
+*.key
+*.pem
+*.pfx
+*.snk
+secrets/
+.env
+
+# ============================================================================
+# KEEP (whitelist exceptions)
+# ============================================================================
+# Phase_*_known_good/ snapshots = reference binaries
+!MongilLoader/build/Phase_*_known_good/
+!MongilLoader/build/Phase_*_known_good/**
+
+# top-level .efi outputs (current dev artifacts)
+!MongilLoader/build/*.efi
+!MongilLoader/build/Loader.efi
+!MongilLoader/build/LoaderNoGuard.efi
+!MongilLoader/build/OphionDxe.efi

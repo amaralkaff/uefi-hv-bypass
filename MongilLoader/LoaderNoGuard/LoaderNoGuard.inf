@@ -1,0 +1,37 @@
+## @file
+#  LoaderNoGuard - Ophion-only UEFI loader for PG visibility test
+##
+
+[Defines]
+  INF_VERSION                    = 0x00010005
+  BASE_NAME                      = LoaderNoGuard
+  FILE_GUID                      = 5F2E3D4C-AB9C-4D8E-A6F7-B8C9D0E1F234
+  MODULE_TYPE                    = UEFI_APPLICATION
+  VERSION_STRING                 = 0.1.0
+  ENTRY_POINT                    = UefiMain
+
+[Sources]
+  LoaderNoGuard.c
+
+[Packages]
+  MdePkg/MdePkg.dec
+  MdeModulePkg/MdeModulePkg.dec
+
+[LibraryClasses]
+  UefiApplicationEntryPoint
+  UefiLib
+  UefiBootServicesTableLib
+  UefiRuntimeServicesTableLib
+  MemoryAllocationLib
+  DevicePathLib
+  BaseMemoryLib
+  PrintLib
+
+[Protocols]
+  gEfiLoadedImageProtocolGuid
+  gEfiSimpleFileSystemProtocolGuid
+
+[Guids]
+
+[Depex]
+  TRUE

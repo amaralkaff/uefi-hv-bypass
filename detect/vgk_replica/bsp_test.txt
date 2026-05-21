@@ -1,0 +1,18 @@
+=== vgk_probe v0.1.0 ===
+[PASS       ] cpuid_hv_present_bit                     (cpuid   ) 
+[PASS       ] cpuid_leaf_0x40000000_zeroed             (cpuid   ) CPUID.0x40000000 = 00000000:00000001:00000000:00000000 (no HV vendor, EAX advertises no HV leaves; firmware quirk, not flagged)
+[PASS       ] cpuid_hyperv_root_partition              (cpuid   ) 
+[PASS       ] cpuid_hv_signatures_full_scan            (cpuid   ) 
+[SKIP       ] msr_hv_synthetic_range_gp                (msr     ) probe_drv not loaded; load VgkProbeDrv to enable
+[SKIP       ] msr_ia32_debugctl_lbr_set                (msr     ) probe_drv not loaded
+[SKIP       ] cr4_smep_at_idle                         (cr      ) probe_drv not loaded
+[SKIP       ] cr4_smap_at_idle                         (cr      ) probe_drv not loaded
+[SKIP       ] cr4_osxsave                              (cr      ) probe_drv not loaded
+[PASS       ] nic_mac_oui_not_banned                   (nic     ) no banned OUI present
+[PASS       ] smbios_uuid_wellformed                   (smbios  ) UUID = 4529CABF-0C9D-11C3-FEEA-CC84D50F7101
+[PASS       ] smbios_vendor_strings                    (smbios  ) no banned vendor strings
+[PASS       ] topology_processor_count                 (topology) 12 logical CPUs
+[PASS       ] topology_apic_consistency                (topology) APIC topology present
+[PASS       ] timing_rdtsc_cpuid_delta                 (timing  ) p50=1532 p99=1698 (baseline p50=1527 p99=1724)
+
+Summary: 10 pass / 0 fail / 5 skip
