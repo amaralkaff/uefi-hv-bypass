@@ -15,11 +15,12 @@ Workflow: direct commits to `main`. No PRs. Atomic conventional commits per step
 - [x] **Step #7** — `7b3ef9b` feat(ophion): IOCTL_HV_WRITE_MANY (METHOD_BUFFERED, scatter ABI)
 - [x] **Smoke #A+B** — `44dfb29` feat(pubg_external): wire hv_pipe to real IOCTLs + `hv_smoke.exe` harness. `cargo build --bin hv_smoke` green. Runtime cycle-loop deferred until driver loads on hardware.
 - [x] **Step #8 (partial)** — `1cf9286` feat(vmm): per-CPU exit log (Q21-C lock-free 1KB ring/CPU) + `VmmSpin.h` test-and-set spinlock (Q20-B). Still TODO: per-resource session/proc/ept locks wired in VmcallHandler, NV crash flush, IOCTL_HV_GET_LOG returning merged dump, `read_ophn_log.ps1` parser.
+- [x] **Step #8 (finish)** — `ff77148` `2a6e5d7` `75e9ab5` `ad09a1f` `1149439`: ABI op `OPHION_OP_GET_PERCPU_LOG (0x0C)` + VMM `handle_get_percpu_log` + `g_proc_cache_lock` + UNREGISTER under `g_session_lock` + `VmmSpin.h` BaseLib EnableInterrupts/DisableInterrupts switch + driver `IOCTL_HV_GET_VMM_PERCPU_LOG` (METHOD_BUFFERED, system-CR3 pool VA) + Rust `get_vmm_percpu_log` + `hv_smoke --percpu` + `read_ophn_log.ps1 -CrashDump` decoder. VMM build green (`OphionDxe.efi` rebuilt 109KB). NV crash-flush path still TODO (gRT->SetVariable post-EBS unreliable).
 
 ## Open / Next
 
 - [ ] **WDK toolset** — `WindowsKernelModeDriver10.0` PlatformToolset missing from VS18 BuildTools install. Driver build broken until WDK extension reinstalled. (Was working 2026-05-21.) Until then, all driver Steps are source-verified only.
-- [ ] **Step #8 finish** — wire `s_session_lock`/`s_proc_cache_lock`/`s_ept_lock` via `VmmSpin.h` in `VmcallHandler.c` session table accesses; add VMX-abort + machine-check NV flush of `VmmPclSnapshot` to `OphnCrashDump` NV var; extend driver `IOCTL_HV_GET_LOG` to return merged per-CPU log; teach `scripts/read_ophn_log.ps1` to decode the magic+cpu_count+rec_per_cpu+rings blob.
+- [ ] **Step #8 NV-flush tail** — gRT->SetVariable from VMX-root post-EBS is unreliable, so `OphnCrashDump` write path still missing. Future plumbing: BSP-only #MC / VMX-abort handler queues a flush request, BSP guest context (e.g. ophion driver work item polling on NV-var sentinel) calls SetVariable from PASSIVE_LEVEL with the `VmmPclSnapshot` blob. PS1 `-CrashDump` decoder already lands on the matching layout.
 
 ## Track A — VMCALL pipe + ESP
 
