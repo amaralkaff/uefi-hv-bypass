@@ -27,6 +27,7 @@
 #include "EfiCompat.h"
 #include "../include/OphionAbi.h"
 #include "../include/BuildInfo.h"
+#include "VmmSpin.h"
 
 extern UINT64 g_vmm_start_tsc;
 
@@ -103,6 +104,12 @@ typedef struct {
 
 static ophion_session_t g_sessions[MAX_SESSIONS];
 static UINT64           g_register_counter = 0;
+
+// Step #8 (Grill Q20-B): per-resource spinlock. Held only during table
+// mutation (allocate, register-finalize, UNREGISTER zero) so vmexit hot
+// path stays lock-free in the BSP-only era. AP virt (Step #B1+) makes
+// this serialize cross-CPU REGISTER/UNREGISTER races.
+static VMM_SPIN g_session_lock;
 
 static UINT64
 random_session_key(VOID)
@@ -234,9 +241,11 @@ handle_register(
     }
 #endif
 
-    // 5. Allocate session.
+    // 5. Allocate session. Step #8: lock around table mutation only.
+    UINT64 lock_flags = VmmSpinAcquire(&g_session_lock);
     ophion_session_t *s = allocate_session();
     if (!s) {
+        VmmSpinRelease(&g_session_lock, lock_flags);
         resp->status = OPHION_STATUS_NOT_REGISTERED;
         return OPHION_STATUS_NOT_REGISTERED;
     }
@@ -246,6 +255,7 @@ handle_register(
     s->caller_cr3        = caller_cr3;
     s->caller_image_base = req->image_base;
     s->caller_image_size = req->image_size;
+    VmmSpinRelease(&g_session_lock, lock_flags);
 
     resp->session_key    = s->session_key;
     resp->ophion_version = OPHION_VERSION_U32;

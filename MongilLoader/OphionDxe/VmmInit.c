@@ -37,6 +37,7 @@ extern VOID    VmmLogVarSetf(IN CONST CHAR16 *Name, IN CONST CHAR8 *Fmt, ...);
 extern BOOLEAN VmcsAllocMinimalLoadList(VOID);
 extern UINT64  VmcsGetVmexitLoadListPa(VOID);
 extern UINT32  VmcsGetVmexitLoadCount(VOID);
+extern VOID    VmmPclInit(IN UINT32 cpu_count);
 
 extern VIRTUAL_MACHINE_STATE *g_vcpu;
 extern UINT32                 g_cpu_count;
@@ -130,6 +131,12 @@ VmmInitialize(VOID)
     Print(L"[VmmInit] vmx_init done; vmcs_pa=0x%llx vmxon_pa=0x%llx\n",
           g_vcpu ? g_vcpu[0].vmcs_pa  : 0,
           g_vcpu ? g_vcpu[0].vmxon_pa : 0);
+
+    // Step #8 (Grill Q21-C): per-CPU exit log rings. Lock-free; each CPU
+    // writes its own ring at vmexit entry. Snapshot exposed via
+    // OPHION_OP_GET_LOG (driver IOCTL_HV_GET_LOG forwards) and future
+    // crash NV flush.
+    VmmPclInit((UINT32)ncpu);
 #endif
 
 #if 1

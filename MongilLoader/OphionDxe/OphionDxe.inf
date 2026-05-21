@@ -17,6 +17,7 @@
   VmmUtil.c
   VmmLog.c
   VmmLogVar.c
+  VmmPerCpuLog.c
   VmmEpt.c
   VmmVmcs.c
   VmmHostCr3.c

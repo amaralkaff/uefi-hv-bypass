@@ -33,6 +33,8 @@ extern VOID ophion_resolve_get(UINT32 subleaf,
                                UINT32 *out_eax, UINT32 *out_ebx,
                                UINT32 *out_ecx, UINT32 *out_edx);
 extern UINT32 ophion_resolve_set_ncp(UINT64 cr3, UINT32 rva);
+
+#include "VmmPerCpuLog.h"
 extern UINT32 ophion_install_do(UINT64 cr3);
 extern VOID   ophion_install_get(UINT32 subleaf,
                                  UINT32 *out_eax, UINT32 *out_ebx,
@@ -302,6 +304,17 @@ vmexit_handler(IN GUEST_REGS *regs, IN VIRTUAL_MACHINE_STATE *vcpu)
 
     vcpu->exit_reason = exit_reason;
     vcpu->advance_rip = TRUE;
+
+    // Step #8 (Grill Q21-C): per-CPU log ring. Lock-free; this CPU is the
+    // sole writer of g_rings[vcpu->core_id]. Tag = full exit-reason word so
+    // we can recover any modifier bits (vmexit-from-SMM etc.) post-mortem.
+    {
+        UINT64 qual_pcl = 0, rip_pcl = 0;
+        __vmx_vmread(VMCS_EXIT_QUALIFICATION, &qual_pcl);
+        __vmx_vmread(VMCS_GUEST_RIP, &rip_pcl);
+        VmmPclRecord(vcpu->core_id, exit_reason, qual_pcl, rip_pcl,
+                     (UINT32)(exit_reason_full & 0xFFFFFFFFULL));
+    }
 
     // Phase 5a: latch VMM start TSC on first vmexit. Used by STATUS_QUERY
     // handler to report vmm_uptime_ms. Lazy so we don't need a post-launch
