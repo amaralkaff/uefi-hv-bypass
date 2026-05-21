@@ -35,6 +35,7 @@
 #define OPHION_OP_LIST_PROCESSES       0x09
 #define OPHION_OP_RESOLVE_TARGET_BY_PID 0x0A   // Phase 6k
 #define OPHION_OP_READ_SCATTER         0x0B   // Grill Q10: gathered scatter-read
+#define OPHION_OP_GET_PERCPU_LOG       0x0C   // Step #8 / Q21-C: drain VMM per-CPU exit log
 
 // REGISTER request layout (r8 points to this struct in caller memory)
 typedef struct {
@@ -232,3 +233,29 @@ typedef struct {
     uint32_t total_bytes;     // sum of successful read lengths
     uint32_t status;          // OK if ok_count == entry_count, else READ_FAILED
 } ophion_read_scatter_resp_t;
+
+// GET_PERCPU_LOG (Step #8 / Grill Q21-C): drain VMM per-CPU vmexit log.
+//
+// VMM produces a snapshot blob:
+//   [magic u64 = 'OPHNPCL\0'][cpu_count u32][rec_per_cpu u32][per-CPU rings...]
+// where each ring is { head u32, seq u32, record[rec_per_cpu] } and each
+// record is { tsc u64, guest_rip u64, exit_qual u64, exit_reason u16,
+// reserved16 u16, tag u32 } (32 bytes).
+//
+// Caller (driver) provides a SYSTEM-CR3 pool VA in out_buf_va; VMM PT-walks
+// system_cr3 (caller_cr3 == system_cr3 in driver dispatch context) and copies
+// the blob via vmm_guest_write. Resp echoes magic + bytes_written for the
+// driver to forward to user-mode without re-parsing the header.
+typedef struct {
+    uint64_t out_buf_va;          // system VA of driver pool to receive blob
+    uint32_t out_buf_size;        // bytes available at out_buf_va
+    uint32_t reserved;
+} ophion_get_percpu_log_req_t;
+
+typedef struct {
+    uint64_t magic;               // out: 0x4F50484E50434C00 ('OPHNPCL\0')
+    uint32_t bytes_written;       // out: actual snapshot size
+    uint32_t cpu_count;
+    uint32_t records_per_cpu;
+    uint32_t status;
+} ophion_get_percpu_log_resp_t;
