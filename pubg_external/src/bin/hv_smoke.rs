@@ -31,6 +31,10 @@ fn parse_cycles() -> usize {
     1
 }
 
+fn parse_flag(name: &str) -> bool {
+    std::env::args().any(|a| a == name)
+}
+
 fn run_one(verbose: bool) -> Result<()> {
     let session = hv_pipe::register().context("REGISTER")?;
     if verbose {
@@ -92,6 +96,10 @@ fn run_one(verbose: bool) -> Result<()> {
 fn main() -> Result<()> {
     env_logger::init();
 
+    if parse_flag("--percpu") {
+        return dump_percpu();
+    }
+
     let cycles = parse_cycles();
     println!("hv_smoke: running {cycles} cycle(s)");
 
@@ -125,6 +133,40 @@ fn main() -> Result<()> {
     );
     if failures > 0 {
         bail!("{failures} cycle(s) failed");
+    }
+    Ok(())
+}
+
+/// Step #8: dump VMM per-CPU vmexit log. Requires an active session, so
+/// register first then drain. Capacity 32 KiB covers 12-core layout
+/// (12 * 1032 + header = ~12 KiB).
+fn dump_percpu() -> Result<()> {
+    let session = hv_pipe::register().context("REGISTER")?;
+    println!("REGISTER ok key=0x{:x}", session.key);
+
+    let snap = hv_pipe::get_vmm_percpu_log(&session, 32 * 1024)
+        .context("GET_VMM_PERCPU_LOG")?;
+    println!(
+        "snapshot: cpu_count={} records_per_cpu={}",
+        snap.cpu_count, snap.records_per_cpu
+    );
+
+    for (cpu, ring) in snap.ordered_per_cpu().iter().enumerate() {
+        let head = snap.heads[cpu];
+        let seq = snap.seqs[cpu];
+        println!(
+            "  cpu={} head={} seq={} (showing last {})",
+            cpu,
+            head,
+            seq,
+            ring.len()
+        );
+        for r in ring.iter().rev().take(8) {
+            println!(
+                "    tsc=0x{:016x} reason={:>4} qual=0x{:016x} rip=0x{:016x} tag=0x{:08x}",
+                r.tsc, r.exit_reason, r.exit_qual, r.guest_rip, r.tag
+            );
+        }
     }
     Ok(())
 }

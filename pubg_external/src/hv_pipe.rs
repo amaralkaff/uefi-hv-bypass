@@ -43,10 +43,15 @@ const IOCTL_HV_READ_SCATTER: u32 =
     ctl_code(FILE_DEVICE_UNKNOWN, IOCTL_BASE + 5, METHOD_OUT_DIRECT, FILE_ANY_ACCESS);
 const IOCTL_HV_WRITE_MANY: u32 =
     ctl_code(FILE_DEVICE_UNKNOWN, IOCTL_BASE + 6, METHOD_BUFFERED, FILE_ANY_ACCESS);
+const IOCTL_HV_GET_VMM_PERCPU_LOG: u32 =
+    ctl_code(FILE_DEVICE_UNKNOWN, IOCTL_BASE + 7, METHOD_BUFFERED, FILE_ANY_ACCESS);
 
 pub const SCATTER_MAX_ENTRIES: usize = 1024;
 pub const WRITE_MANY_MAX_ENTRIES: usize = 64;
 pub const SCATTER_RESP_RESERVED_BYTES: u32 = 16;
+
+pub const PERCPU_LOG_MAGIC: u64 = 0x4F50484E50434C00; // "OPHNPCL\0"
+pub const PERCPU_LOG_RECORD_BYTES: usize = 32;
 
 pub const OPHION_STATUS_OK: u32 = 0;
 pub const OPHION_STATUS_NOT_REGISTERED: u32 = 1;
@@ -633,4 +638,166 @@ fn sha256(data: &[u8]) -> [u8; 32] {
         out[i * 4..i * 4 + 4].copy_from_slice(&v.to_be_bytes());
     }
     out
+}
+
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PercpuLogRecord {
+    pub tsc: u64,
+    pub guest_rip: u64,
+    pub exit_qual: u64,
+    pub exit_reason: u16,
+    pub reserved16: u16,
+    pub tag: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PercpuLogResp {
+    pub magic: u64,
+    pub bytes_written: u32,
+    pub cpu_count: u32,
+    pub records_per_cpu: u32,
+    pub status: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct PercpuLogSnapshot {
+    pub cpu_count: u32,
+    pub records_per_cpu: u32,
+    /// Flattened: outer = CPU, inner = records_per_cpu records.
+    pub rings: Vec<Vec<PercpuLogRecord>>,
+    /// Per-CPU monotonic write counter (head index = head % records_per_cpu).
+    pub heads: Vec<u32>,
+    /// Per-CPU monotonic write count (incl. wraps).
+    pub seqs: Vec<u32>,
+}
+
+impl PercpuLogSnapshot {
+    /// Returns records ordered oldest-first per CPU, dropping unwritten slots.
+    pub fn ordered_per_cpu(&self) -> Vec<Vec<PercpuLogRecord>> {
+        let n = self.records_per_cpu as usize;
+        let mut out = Vec::with_capacity(self.rings.len());
+        for (i, ring) in self.rings.iter().enumerate() {
+            let seq = self.seqs[i] as usize;
+            let count = seq.min(n);
+            let head = (self.heads[i] as usize) % n;
+            let start = if seq <= n { 0 } else { head };
+            let mut v = Vec::with_capacity(count);
+            for k in 0..count {
+                v.push(ring[(start + k) % n]);
+            }
+            out.push(v);
+        }
+        out
+    }
+}
+
+/// Drain the VMM per-CPU vmexit log via VMCALL relay (Step #8).
+///
+/// Pulls a snapshot blob from the VMM and decodes it into structured form.
+/// `capacity_bytes` controls the size of the kernel pool the driver allocates
+/// for the blob — pick generously (16-32 KiB covers the 12-core box).
+pub fn get_vmm_percpu_log(session: &Session, capacity_bytes: usize) -> Result<PercpuLogSnapshot> {
+    let total = capacity_bytes + size_of::<PercpuLogResp>();
+    let mut buf = vec![0u8; total];
+
+    let returned = unsafe {
+        ioctl_raw(
+            session.handle,
+            IOCTL_HV_GET_VMM_PERCPU_LOG,
+            std::ptr::null(),
+            0,
+            buf.as_mut_ptr(),
+            buf.len() as u32,
+        )
+    }?;
+
+    if (returned as usize) < size_of::<PercpuLogResp>() {
+        return Err(anyhow!(
+            "GET_VMM_PERCPU_LOG short response: {} bytes",
+            returned
+        ));
+    }
+
+    let resp: PercpuLogResp =
+        unsafe { std::ptr::read_unaligned(buf.as_ptr() as *const PercpuLogResp) };
+    if resp.status != OPHION_STATUS_OK {
+        return Err(anyhow!(
+            "GET_VMM_PERCPU_LOG VMM rejected: status={} bytes_written={}",
+            resp.status,
+            resp.bytes_written
+        ));
+    }
+    if resp.magic != PERCPU_LOG_MAGIC {
+        return Err(anyhow!(
+            "GET_VMM_PERCPU_LOG magic mismatch: 0x{:016x}",
+            resp.magic
+        ));
+    }
+
+    let blob_off = size_of::<PercpuLogResp>();
+    let blob_end = blob_off + resp.bytes_written as usize;
+    if blob_end > buf.len() {
+        return Err(anyhow!(
+            "GET_VMM_PERCPU_LOG blob overflow: end={} buf={}",
+            blob_end,
+            buf.len()
+        ));
+    }
+    let blob = &buf[blob_off..blob_end];
+    if blob.len() < 16 {
+        return Err(anyhow!("snapshot blob too small: {} bytes", blob.len()));
+    }
+
+    // [magic u64][cpu_count u32][rec_per_cpu u32]
+    let blob_magic = u64::from_le_bytes(blob[0..8].try_into().unwrap());
+    let blob_cpu_count = u32::from_le_bytes(blob[8..12].try_into().unwrap());
+    let blob_rec_per_cpu = u32::from_le_bytes(blob[12..16].try_into().unwrap());
+    if blob_magic != PERCPU_LOG_MAGIC {
+        return Err(anyhow!(
+            "snapshot magic mismatch: 0x{:016x}",
+            blob_magic
+        ));
+    }
+    let n = blob_rec_per_cpu as usize;
+    let ring_bytes = 8 + n * PERCPU_LOG_RECORD_BYTES;
+    let need = 16 + (blob_cpu_count as usize) * ring_bytes;
+    if blob.len() < need {
+        return Err(anyhow!(
+            "snapshot truncated: have {} need {}",
+            blob.len(),
+            need
+        ));
+    }
+
+    let mut rings = Vec::with_capacity(blob_cpu_count as usize);
+    let mut heads = Vec::with_capacity(blob_cpu_count as usize);
+    let mut seqs = Vec::with_capacity(blob_cpu_count as usize);
+    let mut off = 16;
+    for _ in 0..blob_cpu_count {
+        let head = u32::from_le_bytes(blob[off..off + 4].try_into().unwrap());
+        let seq = u32::from_le_bytes(blob[off + 4..off + 8].try_into().unwrap());
+        off += 8;
+        let mut ring = Vec::with_capacity(n);
+        for _ in 0..n {
+            let r: PercpuLogRecord = unsafe {
+                std::ptr::read_unaligned(blob[off..].as_ptr() as *const PercpuLogRecord)
+            };
+            ring.push(r);
+            off += PERCPU_LOG_RECORD_BYTES;
+        }
+        rings.push(ring);
+        heads.push(head);
+        seqs.push(seq);
+    }
+
+    Ok(PercpuLogSnapshot {
+        cpu_count: blob_cpu_count,
+        records_per_cpu: blob_rec_per_cpu,
+        rings,
+        heads,
+        seqs,
+    })
 }
