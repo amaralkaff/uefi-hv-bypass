@@ -15,6 +15,7 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use pubg_external::hv_pipe::{self, ScatterEntry, SCATTER_RESP_RESERVED_BYTES};
+use pubg_external::sdk::dumper::{self, Resolver, SigDef};
 use std::time::Instant;
 
 fn parse_cycles() -> usize {
@@ -33,6 +34,16 @@ fn parse_cycles() -> usize {
 
 fn parse_flag(name: &str) -> bool {
     std::env::args().any(|a| a == name)
+}
+
+fn parse_kv(key: &str) -> Option<String> {
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
+        if a == key {
+            return args.next();
+        }
+    }
+    None
 }
 
 fn run_one(verbose: bool) -> Result<()> {
@@ -98,6 +109,10 @@ fn main() -> Result<()> {
 
     if parse_flag("--percpu") {
         return dump_percpu();
+    }
+
+    if parse_flag("--dump") {
+        return dump_target();
     }
 
     let cycles = parse_cycles();
@@ -169,4 +184,120 @@ fn dump_percpu() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Step #9: PE walker + sig-scan exerciser. Dumps the IMAGE_NT_HEADERS
+/// of the named process, then scans `.text` for a self-locating sig that
+/// always lands at the image base (`MZ\0\0`-prefix anchor) — this proves
+/// the SCATTER → match → resolver pipeline works end-to-end without
+/// requiring real PUBG sigs the harness can't ship.
+///
+///   hv_smoke --dump notepad.exe
+///   hv_smoke --dump TslGame.exe --sig "48 8B 05 ? ? ? ?" --sig-name GWorld --resolver riprel32:3
+///
+/// Custom-sig path: --sig "<ida>" [--sig-name NAME] [--resolver direct|riprel32:OFF|abs64:OFF]
+fn dump_target() -> Result<()> {
+    let target_name = parse_kv("--dump")
+        .ok_or_else(|| anyhow!("--dump requires a target process name"))?;
+    let cache_filename = parse_kv("--cache")
+        .unwrap_or_else(|| format!("ophion_dump_{}.bin", target_name.replace('.', "_")));
+
+    let session = hv_pipe::register().context("REGISTER")?;
+    println!("REGISTER ok key=0x{:x}", session.key);
+
+    let target = hv_pipe::resolve_target(&session, &target_name)
+        .with_context(|| format!("RESOLVE {target_name}"))?;
+    println!(
+        "RESOLVE ok pid={} base=0x{:x} size=0x{:x}",
+        target.pid, target.base, target.size
+    );
+
+    let pe = dumper::read_pe_info(&session, &target).context("read PE header")?;
+    println!(
+        "PE: stamp=0x{:08x} sections={}",
+        pe.timedate_stamp,
+        pe.sections.len()
+    );
+    for s in &pe.sections {
+        println!(
+            "  {:8} VA=0x{:08x} VSize=0x{:08x} chars=0x{:08x}",
+            s.name, s.virtual_address, s.virtual_size, s.characteristics
+        );
+    }
+
+    // Build sig list. Default sanity sig: the MZ DOS header byte sequence
+    // present at every PE base. Lands once exactly. Real engine sigs come
+    // via --sig from the caller.
+    let mut sigs = Vec::<SigDef>::new();
+    let mut sig_args = std::env::args().skip(1);
+    let mut last_pat: Option<String> = None;
+    let mut last_name: Option<String> = None;
+    let mut last_resolver: Option<String> = None;
+    while let Some(a) = sig_args.next() {
+        match a.as_str() {
+            "--sig" => last_pat = sig_args.next(),
+            "--sig-name" => last_name = sig_args.next(),
+            "--resolver" => last_resolver = sig_args.next(),
+            _ => {}
+        }
+    }
+    if let Some(pat) = last_pat {
+        let name = last_name.unwrap_or_else(|| "USER_SIG".to_string());
+        let resolver = parse_resolver(last_resolver.as_deref())?;
+        sigs.push(SigDef::new(&name, &pat, resolver)?);
+    } else {
+        // Fallback sanity sig — finds at least one byte sequence guaranteed
+        // to live in `.rdata` of any UE/Win binary: the rich-header tag
+        // "Rich" is reliable but not always; use IMAGE_DOS_SIGNATURE
+        // doesn't live in .text. Use compiler-emitted "kernel32.dll"
+        // import string, which exists in `.rdata` of every PE that imports
+        // anything. Resolver = direct.
+        sigs.push(SigDef::new(
+            "kernel32_str",
+            "6B 65 72 6E 65 6C 33 32 2E 64 6C 6C", // "kernel32.dll"
+            Resolver::Direct,
+        )?);
+    }
+
+    let dump = dumper::dump(&session, &target, &sigs).context("dump")?;
+    println!("dump complete:");
+    let mut keys: Vec<&String> = dump.entries.keys().collect();
+    keys.sort();
+    for k in keys {
+        println!("  {} = 0x{:x}", k, dump.entries[k]);
+    }
+
+    dumper::cache_save(&cache_filename, &dump).ok();
+    println!(
+        "cached -> {}",
+        dumper::cache_path(&cache_filename).display()
+    );
+
+    // Round-trip via dump_or_load to prove cache hit path works.
+    let cached = dumper::dump_or_load(&session, &target, &sigs, &cache_filename)
+        .context("dump_or_load")?;
+    println!(
+        "cache reload: stamp=0x{:08x} entries={}",
+        cached.timedate_stamp,
+        cached.entries.len()
+    );
+    Ok(())
+}
+
+fn parse_resolver(s: Option<&str>) -> Result<Resolver> {
+    let Some(s) = s else { return Ok(Resolver::Direct) };
+    if s == "direct" {
+        return Ok(Resolver::Direct);
+    }
+    if let Some(rest) = s.strip_prefix("riprel32:") {
+        return Ok(Resolver::RipRel32 {
+            off: rest.parse().context("riprel32 offset")?,
+        });
+    }
+    if let Some(rest) = s.strip_prefix("abs64:") {
+        return Ok(Resolver::Abs64 {
+            off: rest.parse().context("abs64 offset")?,
+        });
+    }
+    bail!("unknown --resolver {s:?}; want direct | riprel32:OFF | abs64:OFF");
 }
