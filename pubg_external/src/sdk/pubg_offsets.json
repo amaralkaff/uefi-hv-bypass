@@ -307,5 +307,29 @@
     "TrajectoryConfig": "0x108",
     "PhysxSDK": "0x11DC9948",
     "SPOOFCALL_GADGET": "0x2423775"
+  },
+  "2605.1.1.89-mini": {
+    "_note": "Partial — mini patch shifted XenuineDecrypt + GNames; reuse 2605.1.1.89 for the rest",
+    "XenuineDecrypt": "0x1099FE28",
+    "UWorld": "0x12498C38",
+    "GNames": "0x1272A460"
+  },
+  "2026-04-29": {
+    "_note": "Partial dump — pages 943-952 sourced; only globals + Xenuine known",
+    "XenuineDecrypt": "0x107A7828",
+    "UWorld": "0x1225F938",
+    "GNames": "0x124EF760"
+  },
+  "2026-04-15": {
+    "_note": "Partial dump — pages 943-952 sourced; only globals + Xenuine known",
+    "XenuineDecrypt": "0x1079AC28",
+    "UWorld": "0x1225E938",
+    "GNames": "0x0"
+  },
+  "2026-04-15-mini": {
+    "_note": "Mini-patch variant of 2026-04-15",
+    "XenuineDecrypt": "0x1079C028",
+    "UWorld": "0x1225F938",
+    "GNames": "0x0"
   }
 }

@@ -1,11 +1,20 @@
 //! Player walker for PUBG. Pulls health (XOR-decrypted), team, position,
-//! bones, name. Designed against the offsets in `pubg_offsets.json`.
+//! gender, name. Designed against `pubg_offsets.json`.
+//!
+//! **Battle Royale caveat** — PUBG's BR servers withhold replicated health
+//! for non-teammates, so even after a successful decrypt enemy `health` will
+//! always read 100.0 in BR. Only own pawn + squad members yield real values.
+//! Deathmatch / training mode do not apply this filter and reveal full HP.
 
 use crate::hv_pipe::Session;
 use crate::sdk::dumper::read_batch;
 use crate::sdk::pubg_offsets::{decrypt, PubgOffsets};
 use anyhow::Result;
 use nalgebra_glm as glm;
+
+/// Health-decrypt pool covers `Actor+0xA10..Actor+0xA40` (48 bytes).
+pub const HEALTH_POOL_BASE: u32 = 0xA10;
+pub const HEALTH_POOL_BYTES: usize = 0x30;
 
 #[derive(Debug, Clone)]
 pub struct Player {
@@ -17,17 +26,22 @@ pub struct Player {
     pub rotation: glm::Vec3,
     pub health: f32,
     pub team_number: i32,
+    /// `Actor + 0xB48`. Used by ESP to pick the gender-specific bone-size
+    /// table when drawing skeletons.
+    pub gender: u8,
+    /// Was the health value reached via the trusted plaintext path
+    /// (`flag == 3`) or the encrypted-pool fallback. ESP can use this to
+    /// flag locked-100 enemies in BR.
+    pub health_trusted: bool,
     pub bones: Vec<glm::Vec3>,
 }
 
 impl Player {
-    /// First SCATTER pulls four pointers off the actor (PlayerState, Mesh,
-    /// RootComponent). Second pulls the encrypted health blob + flag,
-    /// position+rotation off the root component, and the team-number byte.
-    /// Two VMCALLs per actor — for ~100 entity scenes, batch via the planned
-    /// `read_pawn_batch` helper.
+    /// Two VMCALLs per actor:
+    ///   1. SCATTER PlayerState + Mesh + RootComponent pointer triplet.
+    ///   2. SCATTER position + team byte + flag byte + gender byte +
+    ///      48-byte encrypted health pool.
     pub fn from_actor(session: &Session, actor_va: u64, off: &PubgOffsets) -> Result<Self> {
-        // Pointer triplet
         let ptrs = read_batch(
             session,
             &[
@@ -40,12 +54,12 @@ impl Player {
         let mesh_va = u64::from_le_bytes(ptrs[1][..8].try_into().unwrap());
         let root_component_va = u64::from_le_bytes(ptrs[2][..8].try_into().unwrap());
 
-        // Geometry + state batch (variable-shape; collect into one call when
-        // RootComponent valid).
         let mut position = glm::vec3(0.0, 0.0, 0.0);
         let rotation = glm::vec3(0.0, 0.0, 0.0);
         let mut team_number = 0i32;
+        let mut gender = 0u8;
         let mut health = 100.0f32;
+        let mut health_trusted = false;
 
         if root_component_va != 0 {
             let geo = read_batch(
@@ -54,12 +68,8 @@ impl Player {
                     (root_component_va + off.component_location as u64, 12),
                     (actor_va + off.team_number as u64, 4),
                     (actor_va + off.health_flag as u64, 1),
-                    (actor_va + off.health1 as u64, 4),
-                    (actor_va + off.health2 as u64, 4),
-                    (actor_va + off.health3 as u64, 4),
-                    (actor_va + off.health4 as u64, 4),
-                    (actor_va + off.health5 as u64, 4),
-                    (actor_va + off.health6 as u64, 4),
+                    (actor_va + off.gender as u64, 1),
+                    (actor_va + HEALTH_POOL_BASE as u64, HEALTH_POOL_BYTES),
                 ],
             )?;
             position = glm::vec3(
@@ -69,26 +79,11 @@ impl Player {
             );
             team_number = i32::from_le_bytes(geo[1][..4].try_into().unwrap());
             let flag = geo[2][0];
-            let h: [u32; 6] = [
-                u32::from_le_bytes(geo[3][..4].try_into().unwrap()),
-                u32::from_le_bytes(geo[4][..4].try_into().unwrap()),
-                u32::from_le_bytes(geo[5][..4].try_into().unwrap()),
-                u32::from_le_bytes(geo[6][..4].try_into().unwrap()),
-                u32::from_le_bytes(geo[7][..4].try_into().unwrap()),
-                u32::from_le_bytes(geo[8][..4].try_into().unwrap()),
-            ];
-            // Decrypted health is the canonical PUBG path; falls back to raw
-            // Health1 when the lane heuristic produces something insane.
-            let decrypted = decrypt::health(off, &h, flag);
-            if decrypted.is_finite() && (0.0..=200.0).contains(&decrypted) {
-                health = decrypted;
-            } else {
-                // Some builds store hp directly in Health1 as float bytes.
-                let raw = f32::from_bits(h[0]);
-                if raw.is_finite() && (0.0..=200.0).contains(&raw) {
-                    health = raw;
-                }
-            }
+            gender = geo[3][0];
+            let pool = &geo[4][..HEALTH_POOL_BYTES];
+
+            health_trusted = flag == 3;
+            health = decrypt::health(off, pool, flag);
         }
 
         Ok(Player {
@@ -100,6 +95,8 @@ impl Player {
             rotation,
             health,
             team_number,
+            gender,
+            health_trusted,
             bones: Vec::new(),
         })
     }
@@ -108,8 +105,8 @@ impl Player {
         glm::distance(&self.position, other)
     }
 
-    /// Read `APlayerState::PlayerName` (FString, UTF-16). 8-byte data ptr +
-    /// 4-byte count. Caps at 64 chars.
+    /// Read `APlayerState::PlayerName` (FString, UTF-16). 8-byte data ptr
+    /// + 4-byte count. Caps at 64 chars.
     pub fn read_player_name(
         &self,
         session: &Session,

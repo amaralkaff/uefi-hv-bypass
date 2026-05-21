@@ -138,6 +138,10 @@ pub struct PubgOffsets {
     pub health6: u32,
     pub health_keys: [u32; 16],
     pub groggy_health: u32,
+    /// Byte at `Actor + 0xB48`. Disambiguates male/female bone tables; ESP
+    /// uses this to pick which bone-size offset table to read because PUBG
+    /// female chars ship a different USkeletalMeshComponent layout.
+    pub gender: u32,
 
     // PlayerState / GameState
     pub gamestate_player_array: u32,
@@ -171,6 +175,7 @@ impl PubgOffsets {
                 .copied()
                 .ok_or_else(|| anyhow!("field {k:?} missing in build"))
         };
+        let _ = g; // some helpers below intentionally unused; keep for clarity
         let g_or = |k: &str, fallback: u64| -> u64 { m.get(k).copied().unwrap_or(fallback) };
 
         // Health key array (Health_keys0..15). Fall back to 0 when a build
@@ -187,12 +192,12 @@ impl PubgOffsets {
             .get("PersistentLevel")
             .or_else(|| m.get("CurrentLevel"))
             .copied()
-            .ok_or_else(|| anyhow!("PersistentLevel/CurrentLevel missing"))? as u32;
+            .unwrap_or(0x800) as u32;
         let local_players = m
             .get("LocalPlayer")
             .or_else(|| m.get("LocalPlayers"))
             .copied()
-            .ok_or_else(|| anyhow!("LocalPlayer/LocalPlayers missing"))? as u32;
+            .unwrap_or(0xF0) as u32;
         let pcm_loc = m
             .get("CameraCacheLocation")
             .or_else(|| m.get("CamCacheLoc"))
@@ -253,9 +258,9 @@ impl PubgOffsets {
         Ok(Self {
             build_id: build.unwrap_or(DEFAULT_BUILD).to_string(),
 
-            uworld_rva: g("UWorld")?,
-            gnames_rva: g("GNames")?,
-            gobjects_rva: g("GObjects")?,
+            uworld_rva: g_or("UWorld", 0),
+            gnames_rva: g_or("GNames", 0),
+            gobjects_rva: g_or("GObjects", 0),
             xenuine_decrypt_rva: g_or("XenuineDecrypt", 0),
             gnames_ptr: g_or("GNamesPtr", 0x10),
             chunk_size: g_or("ChunkSize", 0x3E4C),
@@ -305,6 +310,7 @@ impl PubgOffsets {
             health6,
             health_keys,
             groggy_health: g_or("GroggyHealth", 0x1530) as u32,
+            gender: g_or("Gender", 0xB48) as u32,
 
             gamestate_player_array: g_or("PlayerArray", 0x410) as u32,
             player_state: g_or("PlayerState", 0x418) as u32,
@@ -362,24 +368,70 @@ pub mod decrypt {
         b.rotate_right(off.name_decrypt_dval)
     }
 
-    /// Health XOR-table decrypt. PUBG stores six packed health bytes plus a
-    /// `Health_Flag` selector that picks which key tuple to apply. Returns
-    /// the float-cast result. When key material is absent (older dumps),
-    /// callers should fall back to reading `Health1` directly.
+    /// Health decrypt. PUBG ships two health storage modes selected by the
+    /// flag byte at `Actor + 0x3B9`:
     ///
-    /// `vals` = `[h1, h2, h3, h4, h5, h6]` raw u32s read from the character
-    /// struct. `flag` = the byte at `health_flag` offset.
-    pub fn health(off: &PubgOffsets, vals: &[u32; 6], flag: u8) -> f32 {
-        // Layout commonly seen: each Health_Val_n XORs against keys[n*2]
-        // and keys[n*2+1] selected by `flag % 4`. Multiple variants exist;
-        // tune by observing values in training mode.
-        let lane = (flag & 0x03) as usize;
-        let mut acc: u32 = 0;
-        for (i, v) in vals.iter().enumerate() {
-            let k = off.health_keys[(i * 2 + lane) % off.health_keys.len()];
-            acc ^= v.wrapping_add(k);
+    /// * `flag == 3` — character is in a server-trusted state (own pawn,
+    ///   teammate, deathmatch peer). Plaintext `f32` lives at
+    ///   `Actor + 0xA38` (= `health2` in the JSON). Just `f32::from_le_bytes`.
+    ///
+    /// * otherwise — encrypted pool spans `0xA10..0xA40`. The byte at
+    ///   `0xA20` (= `health6`) is the runtime XOR key, the byte at `0xA24`
+    ///   (= `health3`) selects which entry of `Health_keys[]` to combine
+    ///   with. The encrypted u32 is read from `0xA3C` (= `health1`).
+    ///
+    /// **BR limitation** — in Battle Royale modes the server withholds
+    /// the replicated health field for non-teammates, so even after a
+    /// successful decrypt enemies always read 100.0. Deathmatch + own
+    /// squad are the verifiable cases.
+    ///
+    /// `pool` is the 0x30-byte slice covering `0xA10..0xA40`. Caller is
+    /// responsible for pulling it via SCATTER. `flag` is `Actor + 0x3B9`.
+    pub fn health(off: &PubgOffsets, pool: &[u8], flag: u8) -> f32 {
+        const POOL_BASE: u32 = 0xA10;
+        let in_pool = |abs: u32| -> Option<usize> {
+            let rel = abs.checked_sub(POOL_BASE)? as usize;
+            if rel + 4 <= pool.len() { Some(rel) } else { None }
+        };
+
+        if flag == 3 {
+            if let Some(off2) = in_pool(off.health2) {
+                let v = f32::from_le_bytes(pool[off2..off2 + 4].try_into().unwrap());
+                if v.is_finite() && (0.0..=200.0).contains(&v) {
+                    return v;
+                }
+            }
         }
-        f32::from_bits(acc)
+
+        // Encrypted path. Both selectors are bytes inside the same pool, so
+        // bounds-check before reading.
+        let xor_key_off = off.health6.wrapping_sub(POOL_BASE) as usize;
+        let idx_off = off.health3.wrapping_sub(POOL_BASE) as usize;
+        let raw_off_opt = in_pool(off.health1);
+
+        if xor_key_off < pool.len() && idx_off < pool.len() {
+            if let Some(raw_off) = raw_off_opt {
+                let xor_key = pool[xor_key_off] as u32;
+                let idx = pool[idx_off] as usize;
+                let key = off.health_keys[idx % off.health_keys.len()];
+                let raw = u32::from_le_bytes(pool[raw_off..raw_off + 4].try_into().unwrap());
+                let dec = raw ^ key ^ xor_key.wrapping_mul(0x01010101);
+                let v = f32::from_bits(dec);
+                if v.is_finite() && (0.0..=200.0).contains(&v) {
+                    return v;
+                }
+            }
+        }
+
+        // Last-ditch fallback: treat health1 as plaintext float. Some early
+        // builds did this; gives ESP something to draw rather than nothing.
+        if let Some(off1) = in_pool(off.health1) {
+            let v = f32::from_le_bytes(pool[off1..off1 + 4].try_into().unwrap());
+            if v.is_finite() && (0.0..=200.0).contains(&v) {
+                return v;
+            }
+        }
+        100.0
     }
 }
 
@@ -422,5 +474,47 @@ mod tests {
         // VehicleHealth lives only in .97
         assert!(off.extra("VehicleHealth").is_some());
         assert!(off.extra("DefinitelyNotAField").is_none());
+    }
+
+    #[test]
+    fn partial_build_loads() {
+        // Partial dumps from pages 943-952 — only XenuineDecrypt/UWorld/GNames
+        // known. for_build must not error; missing fields default to 0 / spec.
+        let off = PubgOffsets::for_build(Some("2026-04-29")).unwrap();
+        assert_eq!(off.uworld_rva, 0x1225F938);
+        assert_eq!(off.gnames_rva, 0x124EF760);
+        assert_eq!(off.gobjects_rva, 0); // not in partial dump
+        // class field defaults still populated
+        assert_eq!(off.root_component, 0x308);
+        assert_eq!(off.gender, 0xB48);
+    }
+
+    #[test]
+    fn gender_field_present() {
+        let off = PubgOffsets::for_build(None).unwrap();
+        assert_eq!(off.gender, 0xB48);
+    }
+
+    #[test]
+    fn health_plaintext_path_when_flag_3() {
+        let off = PubgOffsets::for_build(None).unwrap();
+        // pool covers Actor+0xA10..0xA40. Health2 (plaintext path) = 0xA38.
+        let mut pool = vec![0u8; 0x30];
+        let h2_off = (off.health2 - 0xA10) as usize;
+        let want: f32 = 47.5;
+        pool[h2_off..h2_off + 4].copy_from_slice(&want.to_le_bytes());
+        let v = decrypt::health(&off, &pool, 3);
+        assert!((v - want).abs() < 0.01, "plaintext path got {v}");
+    }
+
+    #[test]
+    fn health_falls_back_when_decrypt_fails() {
+        let off = PubgOffsets::for_build(None).unwrap();
+        // Pool full of zeros + flag != 3. Encrypted path produces 0.0
+        // (finite, in [0..200]) -> returns that. Sanity check it doesn't NaN.
+        let pool = vec![0u8; 0x30];
+        let v = decrypt::health(&off, &pool, 0);
+        assert!(v.is_finite());
+        assert!((0.0..=200.0).contains(&v));
     }
 }

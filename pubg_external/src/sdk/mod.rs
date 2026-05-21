@@ -4,6 +4,7 @@ pub mod uworld;
 pub mod player;
 pub mod dumper;
 pub mod pubg_offsets;
+pub mod xenuine;
 
 pub use dumper::{DumpResult, Pattern, Resolver, SigDef, Tok};
 pub use pubg_offsets::PubgOffsets;
