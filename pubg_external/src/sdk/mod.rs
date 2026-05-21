@@ -6,5 +6,7 @@
 pub mod offsets;
 pub mod uworld;
 pub mod player;
+pub mod dumper;
 
 pub use offsets::Offsets;
+pub use dumper::{DumpResult, Pattern, Resolver, SigDef, Tok};
