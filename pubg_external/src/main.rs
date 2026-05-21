@@ -24,7 +24,7 @@ fn main() -> Result<()> {
 
     let target = hv_pipe::resolve_target(&session, "TslGame.exe")
         .context("PUBG process not found")?;
-    log::info!("target pid={} cr3={:#x}", target.pid, target.cr3);
+    log::info!("target pid={} base={:#x} size={:#x}", target.pid, target.base, target.size);
 
     let offsets = sdk::offsets::fetch().context("offset fetch failed")?;
     log::info!("offsets loaded: build={}", offsets.build_id);
