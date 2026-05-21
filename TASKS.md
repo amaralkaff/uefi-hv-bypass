@@ -22,13 +22,9 @@ Workflow: direct commits to `main`. No PRs. Atomic conventional commits per step
 - [ ] **WDK toolset** — `WindowsKernelModeDriver10.0` PlatformToolset missing from VS18 BuildTools install. Driver build broken until WDK extension reinstalled. (Was working 2026-05-21.) Until then, all driver Steps are source-verified only.
 - [ ] **Step #8 NV-flush tail** — gRT->SetVariable from VMX-root post-EBS is unreliable, so `OphnCrashDump` write path still missing. Future plumbing: BSP-only #MC / VMX-abort handler queues a flush request, BSP guest context (e.g. ophion driver work item polling on NV-var sentinel) calls SetVariable from PASSIVE_LEVEL with the `VmmPclSnapshot` blob. PS1 `-CrashDump` decoder already lands on the matching layout.
 
-## Track A — VMCALL pipe + ESP
+- [x] **Step #9** — `2802739` `32e6cb5` feat(pubg_external): `sdk::dumper` PE walker + IDA sig parser + chunked SCATTER scan (1 MiB chunks, 64 B overlap) + Direct/RipRel32/Abs64 resolvers + cache file `%LOCALAPPDATA%\Microsoft\Windows\WER\Temp\ophion_dump_*.bin` (magic `OPHNDMP\0`, TimeDateStamp-keyed) + `dump_or_load()` cache-or-rebuild + `read_batch()` helper. `hv_smoke --dump <process>` drives PE walk + section enum + sanity-sig scan + cache round-trip end-to-end. 4/4 unit tests green (`cargo test --lib dumper`).
 
-- [ ] **Step #9** — pubg_external dumper (Q15-E)
-  - `pubg_external/src/sdk/dumper.rs`: sig scan via SCATTER for GNames+GObjects+GWorld
-  - FName string-table walk, UObject iter
-  - Cache `ofs.bin` to `%LOCALAPPDATA%\...\WER\Temp\`
-  - Invalidate keyed on `TslGame.exe` `IMAGE_NT_HEADERS.FileHeader.TimeDateStamp`
+## Track A — VMCALL pipe + ESP
 
 - [ ] **Step #10** — Lyra Stage 2 validation (Q23-B)
   - Pattern-scan finds GNames+GObjects+GWorld in Lyra
