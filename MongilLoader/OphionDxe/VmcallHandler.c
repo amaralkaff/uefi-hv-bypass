@@ -222,7 +222,9 @@ handle_register(
 
     // 4. Compare hash to compiled-in expected. Phase 5g: locked auth.
     // Flip OPHION_DEV_ACCEPT_ALL=0 to enforce kExpectedCheatHash compare.
-#define OPHION_DEV_ACCEPT_ALL 0
+    // Step #4 (Grill Q5-D): dev-mode bypass — any caller .text accepted.
+    // Production must flip to 0 and bake real hash via scripts/hash_cheat_exe.py.
+#define OPHION_DEV_ACCEPT_ALL 1
 #if !OPHION_DEV_ACCEPT_ALL
     for (UINTN i = 0; i < 32; i++) {
         if (hash[i] != kExpectedCheatHash[i]) {
