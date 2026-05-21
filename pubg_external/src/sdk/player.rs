@@ -16,6 +16,34 @@ use nalgebra_glm as glm;
 pub const HEALTH_POOL_BASE: u32 = 0xA10;
 pub const HEALTH_POOL_BYTES: usize = 0x30;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Skeleton {
+    Male,
+    Female,
+    Unknown,
+}
+
+impl Skeleton {
+    /// PUBG ships distinct USkeletalMeshComponent layouts for male and female
+    /// characters; their bone-count constants differ. Reading the gender
+    /// byte at `Actor+0xB48` is unreliable (often returns 0 mid-spawn,
+    /// rendering male connections on a female mesh and stretching ESP), so
+    /// the canonical disambiguator is the bone count at `Mesh+BoneCount`.
+    ///
+    /// Picks based on observed PUBG bone counts (UC pages 943-952).
+    /// Unknown when the count is zero (mesh not yet streamed) or wildly
+    /// outside the expected ranges.
+    pub fn from_bone_count(count: i32) -> Skeleton {
+        match count {
+            // Male reference rig: ~143 bones across builds 2025-2026.
+            130..=160 => Skeleton::Male,
+            // Female reference rig: ~155-170 bones (extra cosmetic/IK chain).
+            161..=190 => Skeleton::Female,
+            _ => Skeleton::Unknown,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Player {
     pub actor_va: u64,
@@ -26,9 +54,15 @@ pub struct Player {
     pub rotation: glm::Vec3,
     pub health: f32,
     pub team_number: i32,
-    /// `Actor + 0xB48`. Used by ESP to pick the gender-specific bone-size
-    /// table when drawing skeletons.
+    /// `Actor + 0xB48`. Used by ESP as a *hint* only; bone-count via
+    /// [`Skeleton::from_bone_count`] is the canonical disambiguator
+    /// because the gender byte often reads 0 mid-spawn.
     pub gender: u8,
+    /// Bone-count-derived skeleton classification. Populated when the mesh
+    /// pointer is non-null and the bone count lands in a known range.
+    pub skeleton: Skeleton,
+    /// Raw bone count read from the USkeletalMeshComponent.
+    pub bone_count: i32,
     /// Was the health value reached via the trusted plaintext path
     /// (`flag == 3`) or the encrypted-pool fallback. ESP can use this to
     /// flag locked-100 enemies in BR.
@@ -60,6 +94,7 @@ impl Player {
         let mut gender = 0u8;
         let mut health = 100.0f32;
         let mut health_trusted = false;
+        let mut bone_count = 0i32;
 
         if root_component_va != 0 {
             let geo = read_batch(
@@ -86,6 +121,19 @@ impl Player {
             health = decrypt::health(off, pool, flag);
         }
 
+        if mesh_va != 0 && off.bone_count != 0 {
+            // Cheap single-field read; exposes BoneCount for the skeleton
+            // classifier. Two reasons to keep this separate from the geo
+            // batch: (a) mesh_va resolution depends on the actor read above,
+            // (b) we still want a Player even when the skeletal mesh hasn't
+            // streamed in yet (returns 0 -> Skeleton::Unknown).
+            let mc = read_batch(session, &[(mesh_va + off.bone_count as u64, 4)]);
+            if let Ok(buf) = mc {
+                bone_count = i32::from_le_bytes(buf[0][..4].try_into().unwrap());
+            }
+        }
+        let skeleton = Skeleton::from_bone_count(bone_count);
+
         Ok(Player {
             actor_va,
             player_state_va,
@@ -96,6 +144,8 @@ impl Player {
             health,
             team_number,
             gender,
+            skeleton,
+            bone_count,
             health_trusted,
             bones: Vec::new(),
         })
@@ -137,5 +187,32 @@ impl Player {
             chars.truncate(end);
         }
         Ok(Some(String::from_utf16_lossy(&chars)))
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn skeleton_classifies_male_count() {
+        assert_eq!(Skeleton::from_bone_count(143), Skeleton::Male);
+        assert_eq!(Skeleton::from_bone_count(130), Skeleton::Male);
+        assert_eq!(Skeleton::from_bone_count(160), Skeleton::Male);
+    }
+
+    #[test]
+    fn skeleton_classifies_female_count() {
+        assert_eq!(Skeleton::from_bone_count(170), Skeleton::Female);
+        assert_eq!(Skeleton::from_bone_count(161), Skeleton::Female);
+        assert_eq!(Skeleton::from_bone_count(190), Skeleton::Female);
+    }
+
+    #[test]
+    fn skeleton_unknown_when_zero_or_silly() {
+        assert_eq!(Skeleton::from_bone_count(0), Skeleton::Unknown);
+        assert_eq!(Skeleton::from_bone_count(50), Skeleton::Unknown);
+        assert_eq!(Skeleton::from_bone_count(500), Skeleton::Unknown);
     }
 }

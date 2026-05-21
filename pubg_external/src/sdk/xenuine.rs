@@ -23,11 +23,49 @@
 
 use anyhow::Result;
 
+/// Operands. PUBG's Xenuine variants combine `rcx` (the encrypted value
+/// register) with a small set of companion registers seeded from earlier
+/// instructions in the prologue. Track the register identity so the emulator
+/// can mirror a real `sub rcx, reg` instead of dropping it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum XReg {
+    Rax,
+    Rcx,
+    Rdx,
+    Rbx,
+    Rsp,
+    Rbp,
+    Rsi,
+    Rdi,
+    Other(u8),
+}
+
+impl XReg {
+    /// Decode the low 3 bits of a ModR/M byte to a base register. Ignores
+    /// REX.B extension; PUBG's Xenuine uses the low 8 regs only.
+    pub fn from_modrm_reg(reg: u8) -> Self {
+        match reg & 0x07 {
+            0 => XReg::Rax,
+            1 => XReg::Rcx,
+            2 => XReg::Rdx,
+            3 => XReg::Rbx,
+            4 => XReg::Rsp,
+            5 => XReg::Rbp,
+            6 => XReg::Rsi,
+            7 => XReg::Rdi,
+            n => XReg::Other(n),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum XOp {
     XorImm32(u32),
     AddImm32(u32),
-    SubReg, // placeholder — register identity ignored for now
+    /// `sub rcx, <reg>` — `48 29 C1` is the canonical PUBG shape (sub rcx,
+    /// rax); the register field is preserved so a future emulator with a
+    /// proper companion-register tracker can resolve the actual subtrahend.
+    SubReg(XReg),
     Rol(u8),
 }
 
@@ -52,9 +90,14 @@ pub fn parse_program(bytes: &[u8]) -> Vec<XOp> {
             i += 7;
             continue;
         }
-        // 48 29 ??  -> sub rcx, reg (3-byte)
+        // 48 29 <ModR/M>  -> sub r/m64, reg (3-byte form when ModR/M
+        // selects a register operand). PUBG Xenuine ships `48 29 C1` =
+        // `sub rcx, rax`. We decode the source register so a future emulator
+        // can plug in a real value; today's run() leaves it as identity.
         if bytes[i] == 0x48 && bytes[i + 1] == 0x29 {
-            out.push(XOp::SubReg);
+            let modrm = bytes[i + 2];
+            let src_reg = XReg::from_modrm_reg(modrm >> 3);
+            out.push(XOp::SubReg(src_reg));
             i += 3;
             continue;
         }
@@ -77,7 +120,13 @@ pub fn run(prog: &[XOp], encrypted: u64) -> u64 {
         match *op {
             XOp::XorImm32(k) => v ^= k as u64,
             XOp::AddImm32(k) => v = v.wrapping_add(k as u64),
-            XOp::SubReg => {} // TODO: needs companion-register tracking
+            XOp::SubReg(_reg) => {
+                // TODO: companion-register tracking. PUBG's prologue seeds
+                // the subtrahend register from a prior `mov rax, [rip+...]`
+                // or similar load that points at a runtime constant. Until
+                // that load is parsed, leave v unchanged so subsequent ops
+                // still behave deterministically.
+            }
             XOp::Rol(n) => v = v.rotate_left(n as u32),
         }
     }
@@ -129,5 +178,26 @@ mod tests {
     #[test]
     fn empty_prologue_errors() {
         assert!(decrypt(&[0x90, 0xC3], 0x1234).is_err());
+    }
+
+    #[test]
+    fn sub_decodes_register_field() {
+        // 48 29 C1  -> sub rcx, rax (PUBG canonical)
+        let prog = parse_program(&[0x48, 0x29, 0xC1]);
+        assert_eq!(prog.len(), 1);
+        match prog[0] {
+            XOp::SubReg(reg) => assert_eq!(reg, XReg::Rax),
+            _ => panic!("expected SubReg"),
+        }
+    }
+
+    #[test]
+    fn sub_decodes_other_registers() {
+        // 48 29 D9  -> sub rcx, rbx
+        let prog = parse_program(&[0x48, 0x29, 0xD9]);
+        match prog[0] {
+            XOp::SubReg(reg) => assert_eq!(reg, XReg::Rbx),
+            _ => panic!("expected SubReg"),
+        }
     }
 }
