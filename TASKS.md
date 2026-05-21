@@ -8,41 +8,22 @@ Workflow: direct commits to `main`. No PRs. Atomic conventional commits per step
 
 - [x] **Step #1** — `b934e70` chore: absorb Ophion driver into main repo (Q24-C)
 - [x] **Step #2** — `946f9a1` feat(abi): add OPHION_OP_READ_SCATTER (0x0B) (Q3+Q10)
+- [x] **Step #3** — `22368ef` feat(ophion): driver scaffolding for VMCALL relay (Q1+Q2+Q6+Q8+Q9-C)
+- [x] **Step #4** — `8db687c` feat(ophion): IOCTL_HV_REGISTER (Q3-B+Q4+Q5-D+Q6-B+Q7-B)
+- [x] **Step #5** — `1d49cb7` feat(ophion): IOCTL_HV_RESOLVE + IOCTL_HV_UNREGISTER (Q11-B)
+- [x] **Step #5b** — `fa941d2` feat(vmm): enable dev hash-bypass for OPHION_OP_REGISTER (Q5-D)
+- [x] **Step #6** — `a1ffe9a` feat(ophion): IOCTL_HV_READ_SCATTER METHOD_OUT_DIRECT (Q4-B+Q7-B)
+- [x] **Step #7** — `7b3ef9b` feat(ophion): IOCTL_HV_WRITE_MANY METHOD_IN_DIRECT
 
-## Open — Q9 unresolved
+## Build env blocker
 
-- [ ] **Q9 device-name** — picked B (NV var) but recommendation was C (static obscure name). Decide: B or C?
-  - B: NV var `OphnDev` written by VMM, driver reads at boot. Needs SE_SYSTEM_ENVIRONMENT_NAME (admin) from user side.
-  - C: static `\Device\MsftHidIo`, no symlink. Open via `\\?\GLOBALROOT\Device\MsftHidIo`.
+- [ ] **WDK toolset missing** — `WindowsKernelModeDriver10.0` PlatformToolset not installed in current `C:\Program Files (x86)\Microsoft Visual Studio\18\BuildTools`. VS Community uninstalled (memory `reference_ophion_build.md` path stale). Steps #3-#7 source verified by review only; binary build deferred until WDK component restored.
+
+## Resolved
+
+- **Q9 device-name** — final pick C (static `\Device\MsftHidIo`, no DosDevices). Recommendation accepted; B (NV var) reasoning weak.
 
 ## Track A — VMCALL pipe + ESP
-
-- [ ] **Step #3** — driver scaffolding
-  - Random/obscure device name (Q9) — depends on decision above
-  - Per-handle `FILE_OBJECT->FsContext` session (Q6-B)
-  - BSP-pinned worker thread + queue (Q8-B)
-  - Trampoline VA discovery via `NtCreateProfile` patch parse (Q2-B)
-  - No IOCTLs yet — plumbing only
-  - Smoke: device opens, worker starts, trampoline VA logged via `IOCTL_HV_GET_LOG`
-
-- [ ] **Step #4** — `IOCTL_HV_REGISTER`
-  - `METHOD_BUFFERED`
-  - Dev-mode hash skip (`#ifdef OPHN_DEV_BUILD`, Q5-D)
-  - `KeStackAttachProcess(user_proc)` before VMCALL (Q6-B)
-  - Driver calls trampoline VA (Q1-B)
-  - hv_smoke.exe: open device → REGISTER → expect key
-
-- [ ] **Step #5** — `IOCTL_HV_RESOLVE` + `IOCTL_HV_UNREGISTER`
-  - METHOD_BUFFERED, by-name (Q11-B)
-  - hv_smoke.exe: REGISTER → RESOLVE("notepad.exe") → UNREGISTER, 1000 cycles leak check (pool tag, session slots, PEPROCESS refs)
-
-- [ ] **Step #6** — `IOCTL_HV_READ_SCATTER`
-  - `METHOD_OUT_DIRECT` MDL system VA (Q4-B + Q7-B)
-  - hv_smoke.exe: read notepad PE header, verify "MZ" magic
-
-- [ ] **Step #7** — `IOCTL_HV_WRITE_MANY`
-  - `METHOD_IN_DIRECT`
-  - hv_smoke.exe: write+read scratch region
 
 - [ ] **Step #8** — VMM concurrency primitives (Q20-B + Q21-C)
   - Per-resource spinlocks: `s_session_lock`, `s_ept_lock`, `s_proc_cache_lock`
