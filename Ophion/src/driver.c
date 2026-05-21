@@ -14,13 +14,14 @@
 #include "OphionAbi.h"
 
 #define IOCTL_BASE      0x800
-#define IOCTL_HV_STATUS       CTL_CODE(FILE_DEVICE_UNKNOWN, IOCTL_BASE + 0, METHOD_BUFFERED,   FILE_ANY_ACCESS)
-#define IOCTL_HV_GET_LOG      CTL_CODE(FILE_DEVICE_UNKNOWN, IOCTL_BASE + 1, METHOD_BUFFERED,   FILE_ANY_ACCESS)
-#define IOCTL_HV_REGISTER     CTL_CODE(FILE_DEVICE_UNKNOWN, IOCTL_BASE + 2, METHOD_BUFFERED,   FILE_ANY_ACCESS)
-#define IOCTL_HV_RESOLVE      CTL_CODE(FILE_DEVICE_UNKNOWN, IOCTL_BASE + 3, METHOD_BUFFERED,   FILE_ANY_ACCESS)
-#define IOCTL_HV_UNREGISTER   CTL_CODE(FILE_DEVICE_UNKNOWN, IOCTL_BASE + 4, METHOD_BUFFERED,   FILE_ANY_ACCESS)
-#define IOCTL_HV_READ_SCATTER CTL_CODE(FILE_DEVICE_UNKNOWN, IOCTL_BASE + 5, METHOD_OUT_DIRECT, FILE_ANY_ACCESS)
-#define IOCTL_HV_WRITE_MANY   CTL_CODE(FILE_DEVICE_UNKNOWN, IOCTL_BASE + 6, METHOD_BUFFERED,   FILE_ANY_ACCESS)
+#define IOCTL_HV_STATUS             CTL_CODE(FILE_DEVICE_UNKNOWN, IOCTL_BASE + 0, METHOD_BUFFERED,   FILE_ANY_ACCESS)
+#define IOCTL_HV_GET_LOG            CTL_CODE(FILE_DEVICE_UNKNOWN, IOCTL_BASE + 1, METHOD_BUFFERED,   FILE_ANY_ACCESS)
+#define IOCTL_HV_REGISTER           CTL_CODE(FILE_DEVICE_UNKNOWN, IOCTL_BASE + 2, METHOD_BUFFERED,   FILE_ANY_ACCESS)
+#define IOCTL_HV_RESOLVE            CTL_CODE(FILE_DEVICE_UNKNOWN, IOCTL_BASE + 3, METHOD_BUFFERED,   FILE_ANY_ACCESS)
+#define IOCTL_HV_UNREGISTER         CTL_CODE(FILE_DEVICE_UNKNOWN, IOCTL_BASE + 4, METHOD_BUFFERED,   FILE_ANY_ACCESS)
+#define IOCTL_HV_READ_SCATTER       CTL_CODE(FILE_DEVICE_UNKNOWN, IOCTL_BASE + 5, METHOD_OUT_DIRECT, FILE_ANY_ACCESS)
+#define IOCTL_HV_WRITE_MANY         CTL_CODE(FILE_DEVICE_UNKNOWN, IOCTL_BASE + 6, METHOD_BUFFERED,   FILE_ANY_ACCESS)
+#define IOCTL_HV_GET_VMM_PERCPU_LOG CTL_CODE(FILE_DEVICE_UNKNOWN, IOCTL_BASE + 7, METHOD_BUFFERED,   FILE_ANY_ACCESS)
 
 static NTSTATUS DriverCreate(PDEVICE_OBJECT device_obj, PIRP irp);
 static NTSTATUS DriverCleanup(PDEVICE_OBJECT device_obj, PIRP irp);
@@ -619,6 +620,114 @@ DriverIoControl(
         }
 
         ExFreePoolWithTag(pool, OPHION_RELAY_TAG);
+        break;
+    }
+
+    case IOCTL_HV_GET_VMM_PERCPU_LOG:
+    {
+        // Step #8 (Grill Q21-C): drain VMM per-CPU vmexit log via VMCALL.
+        //
+        // User layout (METHOD_BUFFERED, single SystemBuffer used for both
+        // directions):
+        //   - input: ignored (any size, including 0)
+        //   - output: [ophion_get_percpu_log_resp_t][snapshot blob...]
+        //     where blob is [magic u64][cpu_count u32][rec_per_cpu u32][rings...]
+        //
+        // Snapshot blob lives in a separate non-paged pool (out_pool) which
+        // we hand to VMM as out_buf_va; VMM PT-walks via system CR3 (no
+        // KeStackAttachProcess required) and writes via vmm_guest_write.
+        ULONG out_len = io_stack->Parameters.DeviceIoControl.OutputBufferLength;
+        if (out_len < sizeof(ophion_get_percpu_log_resp_t))
+        {
+            status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+
+        POPHION_SESSION session = (POPHION_SESSION)io_stack->FileObject->FsContext;
+        if (!session)
+        {
+            status = STATUS_INVALID_HANDLE;
+            break;
+        }
+        if (!session->registered)
+        {
+            status = STATUS_INVALID_DEVICE_STATE;
+            break;
+        }
+        if (!relay_is_armed())
+        {
+            status = STATUS_DEVICE_NOT_READY;
+            break;
+        }
+
+        ULONG  blob_capacity = out_len - sizeof(ophion_get_percpu_log_resp_t);
+        SIZE_T req_pool_size = sizeof(ophion_get_percpu_log_req_t) +
+                               sizeof(ophion_get_percpu_log_resp_t);
+
+        PVOID  req_pool  = ExAllocatePool2(POOL_FLAG_NON_PAGED, req_pool_size,
+                                           OPHION_RELAY_TAG);
+        PVOID  blob_pool = (blob_capacity > 0)
+                         ? ExAllocatePool2(POOL_FLAG_NON_PAGED, blob_capacity,
+                                           OPHION_RELAY_TAG)
+                         : NULL;
+
+        if (!req_pool || (blob_capacity > 0 && !blob_pool))
+        {
+            if (req_pool)  ExFreePoolWithTag(req_pool,  OPHION_RELAY_TAG);
+            if (blob_pool) ExFreePoolWithTag(blob_pool, OPHION_RELAY_TAG);
+            status = STATUS_INSUFFICIENT_RESOURCES;
+            break;
+        }
+
+        ophion_get_percpu_log_req_t *kreq =
+            (ophion_get_percpu_log_req_t *)req_pool;
+        kreq->out_buf_va   = (UINT64)(ULONG_PTR)blob_pool;
+        kreq->out_buf_size = blob_capacity;
+        kreq->reserved     = 0;
+        RtlZeroMemory((PUCHAR)req_pool + sizeof(ophion_get_percpu_log_req_t),
+                      sizeof(ophion_get_percpu_log_resp_t));
+
+        OPHION_RELAY_REQ req = {0};
+        req.session     = session;
+        req.op          = OPHION_OP_GET_PERCPU_LOG;
+        req.in_buf      = req_pool;
+        req.in_size     = (UINT32)req_pool_size;
+        req.out_buf     = req_pool;
+        req.out_size    = (UINT32)req_pool_size;
+        req.attach_proc = NULL;        // system-CR3 path; no user attach needed
+
+        NTSTATUS rs = relay_submit(&req);
+        if (!NT_SUCCESS(rs))
+        {
+            ExFreePoolWithTag(req_pool, OPHION_RELAY_TAG);
+            if (blob_pool) ExFreePoolWithTag(blob_pool, OPHION_RELAY_TAG);
+            status = rs;
+            break;
+        }
+
+        ophion_get_percpu_log_resp_t *kresp =
+            (ophion_get_percpu_log_resp_t *)
+            ((PUCHAR)req_pool + sizeof(ophion_get_percpu_log_req_t));
+
+        // user out layout: [resp][blob...]
+        PUCHAR user_out = (PUCHAR)irp->AssociatedIrp.SystemBuffer;
+        RtlCopyMemory(user_out, kresp, sizeof(*kresp));
+
+        ULONG bytes = kresp->bytes_written;
+        if (bytes > blob_capacity) bytes = blob_capacity;
+        if (blob_pool && bytes > 0)
+        {
+            RtlCopyMemory(user_out + sizeof(*kresp), blob_pool, bytes);
+        }
+        irp->IoStatus.Information = sizeof(*kresp) + bytes;
+
+        if (kresp->status != OPHION_STATUS_OK)
+        {
+            status = STATUS_PARTIAL_COPY;
+        }
+
+        ExFreePoolWithTag(req_pool, OPHION_RELAY_TAG);
+        if (blob_pool) ExFreePoolWithTag(blob_pool, OPHION_RELAY_TAG);
         break;
     }
 
