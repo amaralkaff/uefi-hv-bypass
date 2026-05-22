@@ -33,6 +33,8 @@ const IOCTL_BASE: u32 = 0x800;
 
 const IOCTL_HV_STATUS: u32 =
     ctl_code(FILE_DEVICE_UNKNOWN, IOCTL_BASE + 0, METHOD_BUFFERED, FILE_ANY_ACCESS);
+const IOCTL_HV_GET_LOG: u32 =
+    ctl_code(FILE_DEVICE_UNKNOWN, IOCTL_BASE + 1, METHOD_BUFFERED, FILE_ANY_ACCESS);
 const IOCTL_HV_REGISTER: u32 =
     ctl_code(FILE_DEVICE_UNKNOWN, IOCTL_BASE + 2, METHOD_BUFFERED, FILE_ANY_ACCESS);
 const IOCTL_HV_RESOLVE: u32 =
@@ -257,13 +259,43 @@ pub fn cpu_count() -> Result<u32> {
     Ok(out)
 }
 
+/// Drain in-driver hv_log ring buffer (the DbgPrint mirror). 64 KiB cap.
+pub fn driver_log() -> Result<String> {
+    let h = open_device()?;
+    let mut buf = vec![0u8; 64 * 1024];
+    let r = unsafe {
+        let r = ioctl_raw(
+            h,
+            IOCTL_HV_GET_LOG,
+            std::ptr::null(),
+            0,
+            buf.as_mut_ptr(),
+            buf.len() as u32,
+        );
+        let _ = CloseHandle(h);
+        r?
+    };
+    buf.truncate(r as usize);
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    Ok(String::from_utf8_lossy(&buf[..end]).into_owned())
+}
+
 pub fn register() -> Result<Session> {
     let handle = open_device()?;
 
-    // Image hash auth is currently dev-bypassed in VMM (Q5-D / fa941d2),
-    // but compute real SHA-256 of own .text anyway so the prod toggle Just Works.
+    // Image hash auth: HEAD VMM ships dev-bypass (OPHION_DEV_ACCEPT_ALL=1,
+    // commit fa941d2) so own_text_sha256() is fine. The 5/20 baseline
+    // OphionDxe.efi predates that toggle and enforces the baked
+    // kExpectedCheatHash compare. When booted on baseline,
+    // `OPHION_OVERRIDE_HASH=<64 hex chars>` makes us send arbitrary 32 bytes
+    // instead of our own .text hash so REGISTER succeeds without rebuilding.
+    let image_sha256 = match std::env::var("OPHION_OVERRIDE_HASH").ok() {
+        Some(s) => parse_hex_hash(&s)
+            .map_err(|e| anyhow!("OPHION_OVERRIDE_HASH parse: {e}"))?,
+        None => own_text_sha256(),
+    };
     let req = OphionRegisterReq {
-        image_sha256: own_text_sha256(),
+        image_sha256,
         image_base: own_image_base(),
         image_size: own_image_size(),
         reserved: 0,
@@ -524,6 +556,30 @@ fn own_image_size() -> u32 {
         // 4 (sig) + 20 (file hdr) + 56 (in opt hdr to SizeOfImage)
         *(nt.add(0x18 + 0x38) as *const u32)
     }
+}
+
+/// Parse a 64-char hex string into a 32-byte SHA-256 (whitespace ignored).
+/// Used by `OPHION_OVERRIDE_HASH` to talk to a baseline VMM that enforces a
+/// baked `kExpectedCheatHash` without rebuilding it.
+fn parse_hex_hash(s: &str) -> Result<[u8; 32]> {
+    let cleaned: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    if cleaned.len() != 64 {
+        return Err(anyhow!(
+            "expected 64 hex chars, got {}",
+            cleaned.len()
+        ));
+    }
+    let mut out = [0u8; 32];
+    for (i, byte_pair) in cleaned.as_bytes().chunks(2).enumerate() {
+        let hi = (byte_pair[0] as char)
+            .to_digit(16)
+            .ok_or_else(|| anyhow!("bad hex char at {}", i * 2))?;
+        let lo = (byte_pair[1] as char)
+            .to_digit(16)
+            .ok_or_else(|| anyhow!("bad hex char at {}", i * 2 + 1))?;
+        out[i] = ((hi << 4) | lo) as u8;
+    }
+    Ok(out)
 }
 
 fn own_text_sha256() -> [u8; 32] {
