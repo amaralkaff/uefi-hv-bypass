@@ -69,6 +69,35 @@ relay_parse_trampoline_va(VOID)
     return tramp;
 }
 
+//
+// Validate a parsed trampoline VA before we tail-call into it.  Bridge mode
+// caveat: the VMM allocates g_trampoline_page at DXE entry pre-filled with
+// 0xCC int3 bytes and only writes a real trampoline body after the OPHS
+// magic leaf gets called with NtCreateProfile's RVA.  We do not drive OPHS
+// today, so the page stays int3.  Plus, runs have hit MmGetSystemRoutine-
+// Address returning a hot-patch stub whose first 14 bytes happen to match
+// 48 B8 ... FF E0 without being our patch.  Either way, jumping into the
+// "trampoline" lands on int3/junk and BSODs hv_smoke (observed
+// DRIVER_IRQL_NOT_LESS_OR_EQUAL and SYSTEM_THREAD_EXCEPTION_NOT_HANDLED
+// 0x80000003 in C:\Windows\Minidump\052226-71*-01.dmp).
+//
+// Reject the parse when the destination's first byte is 0xCC (int3 fill)
+// or when the page is not a sane kernel VA.  When rejected, callers fall
+// back to OphionRelayCallDirect which bypasses the trampoline entirely
+// (the VMM's RIP-range gate auto-disables when g_trampoline_built == 0).
+//
+static BOOLEAN
+relay_trampoline_va_safe(UINT64 va)
+{
+    if (va == 0) return FALSE;
+    if ((INT64)va > 0) return FALSE;          // must be kernel-half VA
+    PVOID p = (PVOID)(ULONG_PTR)va;
+    if (!MmIsAddressValid(p)) return FALSE;
+    UCHAR first = *(volatile UCHAR *)p;
+    if (first == 0xCC) return FALSE;          // int3 fill -> trampoline never built
+    return TRUE;
+}
+
 static VOID
 relay_worker(_In_ PVOID context)
 {
@@ -111,15 +140,30 @@ relay_worker(_In_ PVOID context)
             attached = TRUE;
         }
 
-        if (s_armed && s_trampoline_va)
+        if (s_armed)
         {
             UINT64 key_in_rax = req->session ? req->session->session_key : 0;
-            req->out_rax = OphionRelayCallTrampoline(
-                s_trampoline_va,
-                key_in_rax,
-                (UINT64)req->op,
-                (UINT64)(ULONG_PTR)req->in_buf,
-                (UINT64)req->in_size);
+            if (s_trampoline_va && relay_trampoline_va_safe(s_trampoline_va))
+            {
+                req->out_rax = OphionRelayCallTrampoline(
+                    s_trampoline_va,
+                    key_in_rax,
+                    (UINT64)req->op,
+                    (UINT64)(ULONG_PTR)req->in_buf,
+                    (UINT64)req->in_size);
+            }
+            else
+            {
+                // Bridge fallback: VMM trampoline page not populated (int3
+                // fill) or never patched.  VMM's RIP-range gate is disabled
+                // while g_trampoline_built == 0, so a direct VMCALL from the
+                // driver still reaches VmcallDispatch.  See AsmRelayCall.asm.
+                req->out_rax = OphionRelayCallDirect(
+                    key_in_rax,
+                    (UINT64)req->op,
+                    (UINT64)(ULONG_PTR)req->in_buf,
+                    (UINT64)req->in_size);
+            }
             req->result = STATUS_SUCCESS;
         }
         else
@@ -156,8 +200,18 @@ relay_init(VOID)
     KeInitializeSpinLock(&s_session_lock);
 
     s_trampoline_va = relay_parse_trampoline_va();
-    s_armed = (s_trampoline_va != 0);
-    hv_log("[relay] trampoline_va=0x%llx armed=%u\n", s_trampoline_va, (UINT32)s_armed);
+
+    // Bridge mode: arm the relay regardless of whether the trampoline VA was
+    // recovered.  When parse fails (or the parsed VA points at int3 fill),
+    // the worker falls back to OphionRelayCallDirect, which issues VMCALL
+    // straight from kernel context.  The VMM accepts this whenever
+    // g_trampoline_built == 0 (the RIP-range gate is conditional on that
+    // flag — see MongilLoader/OphionDxe/VmmExit.c Phase 5e block).
+    s_armed = TRUE;
+    BOOLEAN tramp_ok = (s_trampoline_va != 0) && relay_trampoline_va_safe(s_trampoline_va);
+    hv_log("[relay] trampoline_va=0x%llx tramp_ok=%u armed=%u (path=%s)\n",
+           s_trampoline_va, (UINT32)tramp_ok, (UINT32)s_armed,
+           tramp_ok ? "trampoline" : "direct-vmcall");
 
     HANDLE hthread = NULL;
     OBJECT_ATTRIBUTES oa;
@@ -237,6 +291,23 @@ UINT64
 relay_get_trampoline_va(VOID)
 {
     return s_trampoline_va;
+}
+
+VOID
+relay_set_trampoline_va(UINT64 va)
+{
+    // Bridge-mode discovery channel: the driver queries VMM via CPUID OPHR
+    // sub 8 because NtCreateProfile is not exported from ntoskrnl.exe on
+    // Win10 19041 (only ZwCreateProfileEx is) so MmGetSystemRoutineAddress
+    // returns NULL and the PE-walk fallback in relay_parse_trampoline_va
+    // can't recover the imm64. Override the parse-derived value (which is
+    // 0 in that case) with whatever VMM hands back.
+    if (va != 0)
+    {
+        s_trampoline_va = va;
+        s_armed = TRUE;
+        hv_log("[relay] trampoline armed via OPHR: va=0x%llx\n", va);
+    }
 }
 
 BOOLEAN

@@ -40,6 +40,7 @@ NTSTATUS relay_init(VOID);
 VOID     relay_shutdown(VOID);
 
 UINT64   relay_get_trampoline_va(VOID);
+VOID     relay_set_trampoline_va(UINT64 va);
 BOOLEAN  relay_is_armed(VOID);
 
 POPHION_SESSION relay_session_alloc(VOID);

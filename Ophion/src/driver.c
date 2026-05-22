@@ -137,6 +137,17 @@ DriverEntry(
         return STATUS_HV_OPERATION_FAILED;
     }
 
+    status = relay_init();
+    if (!NT_SUCCESS(status))
+    {
+        hv_log("[hv] relay_init failed: 0x%X (continuing without relay)\n", status);
+        // Non-fatal: VMM still works for status/log IOCTLs even if relay fails.
+        // No CPUID bring-up either; the cpuidex block below requires the
+        // relay queue / spinlocks to be initialized before the worker fires.
+        hv_log("[hv] Hypervisor loaded and active on all cores!\n");
+        return STATUS_SUCCESS;
+    }
+
     // Bridge-mode bring-up: VMM ships the NtCreateProfile patch builder
     // (Phase 4 / 4d-i) but defers running it until a guest issues the
     // CPUID magic leaves below. Old mongil_external did this from user-
@@ -152,9 +163,7 @@ DriverEntry(
     //                                and writes the 14-byte inline patch
     //                                directly into NtCreateProfile body.
     //                                Reads of NtCreateProfile from kernel
-    //                                return the patched bytes — required so
-    //                                relay_parse_trampoline_va below can
-    //                                recover the imm64 trampoline VA.
+    //                                return the patched bytes.
     //
     //                                NB: cloaked install (sub 0xFE) hides
     //                                the patch from PG read-scans by serving
@@ -163,12 +172,22 @@ DriverEntry(
     //                                discover the trampoline through a
     //                                separate channel; here we want the
     //                                patch visible.
+    //   OPHR sub 8: returns the live trampoline VA in EBX:ECX (low:high u32).
+    //               Canonical discovery channel because NtCreateProfile is
+    //               *not* exported from ntoskrnl.exe on Win10 19041 (only
+    //               ZwCreateProfileEx is). MmGetSystemRoutineAddress
+    //               returns NULL there, and the PE-walk fallback in
+    //               relay_parse_trampoline_va never runs. relay_init above
+    //               leaves s_armed = FALSE; the OPHR sub 8 read below arms
+    //               the relay if VMM hands back a non-zero trampoline VA.
     //
-    // Once OPHX returns the patch is live: relay_init below parses
-    // NtCreateProfile and recovers the trampoline VA so the BSP-pinned
-    // worker can VMCALL through it.
+    // BSP affinity: VMM is BSP-only today (Phase 2.7 baseline). CPUID
+    // intercept fires only on the BSP; an AP CPUID hits bare metal and we
+    // see the Alder Lake-style EBX=1 ghost. Pin to CPU 0 across all four
+    // cpuid calls so OPHR/OPHX always reach the VMM dispatcher.
     {
         int regs_buf[4] = {0};
+        KAFFINITY old_aff = KeSetSystemAffinityThreadEx((KAFFINITY)1);
         __cpuidex(regs_buf, 0x4F504852, 0);
         hv_log("[hv] OPHR resolve: a=0x%x b=0x%x c=0x%x d=0x%x\n",
                regs_buf[0], regs_buf[1], regs_buf[2], regs_buf[3]);
@@ -181,15 +200,20 @@ DriverEntry(
         __cpuidex(regs_buf, 0x4F504858, 0);
         hv_log("[hv] OPHX install status: a=0x%x b=0x%x c=0x%x d=0x%x\n",
                regs_buf[0], regs_buf[1], regs_buf[2], regs_buf[3]);
+
+        // OPHR sub 8: trampoline VA in EBX:ECX.  Drives relay arming
+        // because relay_parse_trampoline_va can't recover it on Win10
+        // 19041 where NtCreateProfile is not an exported symbol.
+        __cpuidex(regs_buf, 0x4F504852, 8);
+        UINT64 vmm_tramp_va = (UINT64)(UINT32)regs_buf[1] |
+                              ((UINT64)(UINT32)regs_buf[2] << 32);
+        hv_log("[hv] OPHR sub 8: tramp_lo=0x%x tramp_hi=0x%x va=0x%llx\n",
+               regs_buf[1], regs_buf[2], vmm_tramp_va);
+        relay_set_trampoline_va(vmm_tramp_va);
+
+        KeRevertToUserAffinityThreadEx(old_aff);
     }
 
-    status = relay_init();
-    if (!NT_SUCCESS(status))
-    {
-        hv_log("[hv] relay_init failed: 0x%X (continuing without relay)\n", status);
-        // Non-fatal: VMM still works for status/log IOCTLs even if relay fails
-    }
-    else
     {
         UINT64 tramp = relay_get_trampoline_va();
         if (tramp)
@@ -202,7 +226,7 @@ DriverEntry(
         }
     }
 
-    hv_log("[hv] Hypervisor loaded and active on all cores!\n");
+    hv_log("[hv] Bridge driver loaded.\n");
     return STATUS_SUCCESS;
 }
 

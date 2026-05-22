@@ -75,3 +75,15 @@ extern UINT64 OphionRelayCallTrampoline(
     UINT64 op,
     UINT64 buf_va,
     UINT64 buf_size);
+
+//
+// Direct VMCALL bridge — bypasses NtCreateProfile trampoline. Used when the
+// VMM has not built the trampoline (g_trampoline_built == 0); the VMM's
+// vmexit handler skips the RIP-range gate in that state, so a direct VMCALL
+// from the driver still reaches VmcallDispatch.  See AsmRelayCall.asm.
+//
+extern UINT64 OphionRelayCallDirect(
+    UINT64 session_key,
+    UINT64 op,
+    UINT64 buf_va,
+    UINT64 buf_size);
