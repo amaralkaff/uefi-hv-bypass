@@ -137,6 +137,44 @@ DriverEntry(
         return STATUS_HV_OPERATION_FAILED;
     }
 
+    // Bridge-mode bring-up: VMM ships the NtCreateProfile patch builder
+    // (Phase 4 / 4d-i) but defers running it until a guest issues the
+    // CPUID magic leaves below. Old mongil_external did this from user-
+    // mode; with the new bridge architecture the driver is the canonical
+    // trigger because it loads exactly once and runs in system CR3 (full
+    // ntos mapping needed for the resolve + write).
+    //
+    //   OPHR (eax=0x4F504852) sub 0: resolve ntos_base + KiServiceTable +
+    //                                NtCreateProfile via guest CR3 syscall
+    //                                table walk.  Cached; idempotent.
+    //   OPHX (eax=0x4F504858) sub 0xFE: cloaked install.  Allocates the
+    //                                trampoline page in EfiRuntimeServicesCode,
+    //                                writes the 14-byte inline patch into
+    //                                NtCreateProfile body, and arms EPT
+    //                                cloak so PatchGuard's read-scan returns
+    //                                a shadow page (Phase 7d - 7.9h PG-pass
+    //                                baseline).
+    //
+    // Once OPHX returns the patch is live: relay_init below parses
+    // NtCreateProfile and recovers the trampoline VA so the BSP-pinned
+    // worker can VMCALL through it.
+    {
+        int regs_buf[4] = {0};
+        __cpuidex(regs_buf, 0x4F504852, 0);
+        hv_log("[hv] OPHR resolve: a=0x%x b=0x%x c=0x%x d=0x%x\n",
+               regs_buf[0], regs_buf[1], regs_buf[2], regs_buf[3]);
+
+        __cpuidex(regs_buf, 0x4F504858, 0xFE);
+        hv_log("[hv] OPHX cloaked install: a=0x%x b=0x%x c=0x%x d=0x%x\n",
+               regs_buf[0], regs_buf[1], regs_buf[2], regs_buf[3]);
+
+        // Read non-cloaked install status (sub 0) for log; mid bits encode
+        // the same status_code returned by ophion_install_do.
+        __cpuidex(regs_buf, 0x4F504858, 0);
+        hv_log("[hv] OPHX install status: a=0x%x b=0x%x c=0x%x d=0x%x\n",
+               regs_buf[0], regs_buf[1], regs_buf[2], regs_buf[3]);
+    }
+
     status = relay_init();
     if (!NT_SUCCESS(status))
     {
