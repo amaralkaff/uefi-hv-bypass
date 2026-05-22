@@ -147,13 +147,22 @@ DriverEntry(
     //   OPHR (eax=0x4F504852) sub 0: resolve ntos_base + KiServiceTable +
     //                                NtCreateProfile via guest CR3 syscall
     //                                table walk.  Cached; idempotent.
-    //   OPHX (eax=0x4F504858) sub 0xFE: cloaked install.  Allocates the
-    //                                trampoline page in EfiRuntimeServicesCode,
-    //                                writes the 14-byte inline patch into
-    //                                NtCreateProfile body, and arms EPT
-    //                                cloak so PatchGuard's read-scan returns
-    //                                a shadow page (Phase 7d - 7.9h PG-pass
-    //                                baseline).
+    //   OPHX (eax=0x4F504858) sub 0xFF: uncloaked install. Allocates the
+    //                                trampoline page in EfiRuntimeServicesCode
+    //                                and writes the 14-byte inline patch
+    //                                directly into NtCreateProfile body.
+    //                                Reads of NtCreateProfile from kernel
+    //                                return the patched bytes — required so
+    //                                relay_parse_trampoline_va below can
+    //                                recover the imm64 trampoline VA.
+    //
+    //                                NB: cloaked install (sub 0xFE) hides
+    //                                the patch from PG read-scans by serving
+    //                                a shadow page, but it ALSO hides it
+    //                                from us. Cloak is for Step #B3 once we
+    //                                discover the trampoline through a
+    //                                separate channel; here we want the
+    //                                patch visible.
     //
     // Once OPHX returns the patch is live: relay_init below parses
     // NtCreateProfile and recovers the trampoline VA so the BSP-pinned
@@ -164,12 +173,11 @@ DriverEntry(
         hv_log("[hv] OPHR resolve: a=0x%x b=0x%x c=0x%x d=0x%x\n",
                regs_buf[0], regs_buf[1], regs_buf[2], regs_buf[3]);
 
-        __cpuidex(regs_buf, 0x4F504858, 0xFE);
-        hv_log("[hv] OPHX cloaked install: a=0x%x b=0x%x c=0x%x d=0x%x\n",
+        __cpuidex(regs_buf, 0x4F504858, 0xFF);
+        hv_log("[hv] OPHX uncloaked install: a=0x%x b=0x%x c=0x%x d=0x%x\n",
                regs_buf[0], regs_buf[1], regs_buf[2], regs_buf[3]);
 
-        // Read non-cloaked install status (sub 0) for log; mid bits encode
-        // the same status_code returned by ophion_install_do.
+        // Sub 0 reads install status (status_code, install_attempted, ...).
         __cpuidex(regs_buf, 0x4F504858, 0);
         hv_log("[hv] OPHX install status: a=0x%x b=0x%x c=0x%x d=0x%x\n",
                regs_buf[0], regs_buf[1], regs_buf[2], regs_buf[3]);
