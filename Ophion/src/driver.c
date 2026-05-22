@@ -192,6 +192,22 @@ DriverEntry(
         hv_log("[hv] OPHR resolve: a=0x%x b=0x%x c=0x%x d=0x%x\n",
                regs_buf[0], regs_buf[1], regs_buf[2], regs_buf[3]);
 
+        // OPHS push NtCreateProfile RVA from kernel CR3.  User-mode probe
+        // ophn_resolve_set.exe fails the prologue check because user-CR3
+        // doesn't map kernel pages under KVA Shadow on Win10 19041.  The
+        // driver runs in system CR3, so the same OPHS leaf reaches a CR3
+        // that maps NCP and prologue_ok succeeds — which is the gate for
+        // VMM's NtosBuildTrampoline to fill the trampoline page body.
+        //
+        // RVA hardcoded for the current ntoskrnl.exe (10.0.19041.7058);
+        // bump on patch.  TODO: pull via IOCTL_HV_SET_NCP_RVA from a
+        // user-mode resolver that walks ntoskrnl.exe's PDB.
+        ULONG ncp_rva = 0x95ac10;
+        __cpuidex(regs_buf, 0x4F504853, (int)ncp_rva);
+        hv_log("[hv] OPHS push NCP rva=0x%x: a=0x%x b=0x%x c=0x%x d=0x%x\n",
+               ncp_rva,
+               regs_buf[0], regs_buf[1], regs_buf[2], regs_buf[3]);
+
         __cpuidex(regs_buf, 0x4F504858, 0xFF);
         hv_log("[hv] OPHX uncloaked install: a=0x%x b=0x%x c=0x%x d=0x%x\n",
                regs_buf[0], regs_buf[1], regs_buf[2], regs_buf[3]);
@@ -225,6 +241,13 @@ DriverEntry(
             hv_log("[hv] relay started but trampoline NOT discovered (VMM patch absent?)\n");
         }
     }
+
+    // Push SET_KERNEL_OFFSETS so RESOLVE_TARGET / LIST_PROCESSES /
+    // RESOLVE_TARGET_BY_PID work without the user-mode dbghelp helper.
+    // Hooked into the IOCTL_HV_REGISTER success path below; the bring-up
+    // session here cannot self-REGISTER because driver image hash != baked
+    // user-mode hash (only one accepted hash) and dev-bypass is off in the
+    // baseline VMM. Push fires once on first user-mode REGISTER.
 
     hv_log("[hv] Bridge driver loaded.\n");
     return STATUS_SUCCESS;
@@ -402,6 +425,64 @@ DriverIoControl(
         {
             session->session_key = resp->session_key;
             session->registered  = TRUE;
+
+            // Hook (Phase 5b): on first REGISTER, piggyback SET_KERNEL_OFFSETS
+            // using the freshly minted session_key. Driver self-resolves
+            // PsActiveProcessHead by walking PsInitialSystemProcess.ActiveProcessLinks
+            // chain (no dbghelp / PDB needed). Sticky flag — only fires once
+            // per boot so we do not thrash global VMM state on each cheat run.
+            static volatile LONG s_offsets_pushed = 0;
+            if (InterlockedCompareExchange(&s_offsets_pushed, 1, 0) == 0)
+            {
+#define OPHN_OFF_ACTIVE_PROCESS_LINKS  0x448
+#define OPHN_OFF_UNIQUE_PROCESS_ID     0x440
+#define OPHN_OFF_IMAGE_FILE_NAME       0x5A8
+#define OPHN_OFF_DIRECTORY_TABLE_BASE  0x028
+#define OPHN_OFF_SECTION_BASE_ADDRESS  0x520
+#define OPHN_OFF_PEB                   0x550
+
+                UINT64 head_va = 0;
+                if (PsInitialSystemProcess)
+                {
+                    PLIST_ENTRY sys_links = (PLIST_ENTRY)
+                        ((UCHAR *)PsInitialSystemProcess +
+                         OPHN_OFF_ACTIVE_PROCESS_LINKS);
+                    PLIST_ENTRY cur = sys_links->Blink;
+                    for (UINT32 i = 0; i < 8192; i++)
+                    {
+                        if (cur == NULL) break;
+                        if (cur->Flink == sys_links && cur != sys_links)
+                        {
+                            head_va = (UINT64)(ULONG_PTR)cur;
+                            break;
+                        }
+                        cur = cur->Blink;
+                        if (cur == sys_links) break;
+                    }
+                    hv_log("[hv] head_va=0x%llx (sys=%p)\n",
+                           head_va, PsInitialSystemProcess);
+                }
+
+                if (head_va)
+                {
+                    ophion_kernel_offsets_t kof = {0};
+                    kof.ps_active_process_head_va = head_va;
+                    kof.off_active_process_links  = OPHN_OFF_ACTIVE_PROCESS_LINKS;
+                    kof.off_unique_process_id     = OPHN_OFF_UNIQUE_PROCESS_ID;
+                    kof.off_image_file_name       = OPHN_OFF_IMAGE_FILE_NAME;
+                    kof.off_directory_table_base  = OPHN_OFF_DIRECTORY_TABLE_BASE;
+                    kof.off_section_base_address  = OPHN_OFF_SECTION_BASE_ADDRESS;
+                    kof.off_peb                   = OPHN_OFF_PEB;
+
+                    UINT64 vm = OphionRelayCallDirect(
+                        session->session_key,
+                        OPHION_OP_SET_KERNEL_OFFSETS,
+                        (UINT64)(ULONG_PTR)&kof,
+                        sizeof(kof));
+                    hv_log("[hv] SET_KERNEL_OFFSETS vm=0x%llx kof.status=0x%x\n",
+                           vm, kof.status);
+                }
+            }
         }
 
         RtlCopyMemory(irp->AssociatedIrp.SystemBuffer, resp,
