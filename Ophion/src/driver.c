@@ -79,6 +79,62 @@ DriverUnload(_In_ PDRIVER_OBJECT driver_obj)
     hv_log("[hv] Bridge driver unloaded.\n");
 }
 
+// Bring-up worker. Runs in PsInitialSystemProcess (system CR3) because
+// PsCreateSystemThread always sets PROCESS = nt!PsInitialSystemProcess for
+// its thread bodies. Calls VMM magic CPUID leaves in the order required by
+// the bridge:
+//   1. OPHR sub 0   - resolve ntos_base + KiServiceTable + NtCreateProfile.
+//   2. OPHS         - push NtCreateProfile RVA. VMM's prologue check reads
+//                     the live caller CR3, which here is system CR3 -> ntos
+//                     pages mapped -> prologue_ok=1 -> NtosBuildTrampoline
+//                     populates the runtime trampoline page with real code.
+//   3. OPHX 0xFF    - uncloaked install. Writes the 14-byte inline patch
+//                     into NtCreateProfile body so a guest tail-call into
+//                     it lands in the now-built trampoline.
+//   4. OPHX sub 0   - read install status into hv_log.
+//   5. OPHR sub 8   - read live trampoline VA, hand to relay_set_trampoline_va.
+//
+// Pinned to BSP because the Phase 2.7 baseline VMM virtualizes only CPU 0.
+// A CPUID leaf issued from an AP would hit bare metal and miss the VMM
+// dispatcher entirely.
+static VOID
+BridgeBringUpThread(_In_ PVOID context)
+{
+    UNREFERENCED_PARAMETER(context);
+
+    int regs_buf[4] = {0};
+    KAFFINITY old_aff = KeSetSystemAffinityThreadEx((KAFFINITY)1);
+
+    __cpuidex(regs_buf, 0x4F504852, 0);
+    hv_log("[hv] OPHR resolve: a=0x%x b=0x%x c=0x%x d=0x%x\n",
+           regs_buf[0], regs_buf[1], regs_buf[2], regs_buf[3]);
+
+    // RVA hardcoded for ntoskrnl.exe 10.0.19041.7058. Bump on each kernel
+    // patch -- compute via cdb / ? ntoskrnl!NtCreateProfile - ntoskrnl.
+    ULONG ncp_rva = 0x95ac10;
+    __cpuidex(regs_buf, 0x4F504853, (int)ncp_rva);
+    hv_log("[hv] OPHS push NCP rva=0x%x: a=0x%x b=0x%x c=0x%x d=0x%x\n",
+           ncp_rva, regs_buf[0], regs_buf[1], regs_buf[2], regs_buf[3]);
+
+    __cpuidex(regs_buf, 0x4F504858, 0xFF);
+    hv_log("[hv] OPHX uncloaked install: a=0x%x b=0x%x c=0x%x d=0x%x\n",
+           regs_buf[0], regs_buf[1], regs_buf[2], regs_buf[3]);
+
+    __cpuidex(regs_buf, 0x4F504858, 0);
+    hv_log("[hv] OPHX install status: a=0x%x b=0x%x c=0x%x d=0x%x\n",
+           regs_buf[0], regs_buf[1], regs_buf[2], regs_buf[3]);
+
+    __cpuidex(regs_buf, 0x4F504852, 8);
+    UINT64 vmm_tramp_va = (UINT64)(UINT32)regs_buf[1] |
+                          ((UINT64)(UINT32)regs_buf[2] << 32);
+    hv_log("[hv] OPHR sub 8: tramp_lo=0x%x tramp_hi=0x%x va=0x%llx\n",
+           regs_buf[1], regs_buf[2], vmm_tramp_va);
+    relay_set_trampoline_va(vmm_tramp_va);
+
+    KeRevertToUserAffinityThreadEx(old_aff);
+    PsTerminateSystemThread(STATUS_SUCCESS);
+}
+
 NTSTATUS
 DriverEntry(
     _In_ PDRIVER_OBJECT  driver_obj,
@@ -181,53 +237,37 @@ DriverEntry(
     //               leaves s_armed = FALSE; the OPHR sub 8 read below arms
     //               the relay if VMM hands back a non-zero trampoline VA.
     //
-    // BSP affinity: VMM is BSP-only today (Phase 2.7 baseline). CPUID
-    // intercept fires only on the BSP; an AP CPUID hits bare metal and we
-    // see the Alder Lake-style EBX=1 ghost. Pin to CPU 0 across all four
-    // cpuid calls so OPHR/OPHX always reach the VMM dispatcher.
+    // BSP affinity + System CR3: DriverEntry runs in the caller-process
+    // context (sc.exe -> services.exe), where KVA Shadow on Win10 19041
+    // strips kernel page mappings from the user CR3 half. VMM's OPHS
+    // prologue check reads NtCreateProfile via VMCS_GUEST_CR3, which is
+    // the live user-CR3, and silently returns a zero page -> prologue_ok = 0
+    // -> NtosBuildTrampoline never runs -> trampoline page stays 0xCC fill
+    // -> relay tail-call lands on int3 -> BSOD. Spawn a system thread so
+    // the cpuidex chain runs in PsInitialSystemProcess (system CR3) where
+    // every kernel page is mapped.
+    HANDLE thread_handle = NULL;
+    OBJECT_ATTRIBUTES oa;
+    InitializeObjectAttributes(&oa, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
+    NTSTATUS thread_status = PsCreateSystemThread(
+        &thread_handle, THREAD_ALL_ACCESS, &oa, NULL, NULL,
+        BridgeBringUpThread, NULL);
+    if (NT_SUCCESS(thread_status))
     {
-        int regs_buf[4] = {0};
-        KAFFINITY old_aff = KeSetSystemAffinityThreadEx((KAFFINITY)1);
-        __cpuidex(regs_buf, 0x4F504852, 0);
-        hv_log("[hv] OPHR resolve: a=0x%x b=0x%x c=0x%x d=0x%x\n",
-               regs_buf[0], regs_buf[1], regs_buf[2], regs_buf[3]);
-
-        // OPHS push NtCreateProfile RVA from kernel CR3.  User-mode probe
-        // ophn_resolve_set.exe fails the prologue check because user-CR3
-        // doesn't map kernel pages under KVA Shadow on Win10 19041.  The
-        // driver runs in system CR3, so the same OPHS leaf reaches a CR3
-        // that maps NCP and prologue_ok succeeds — which is the gate for
-        // VMM's NtosBuildTrampoline to fill the trampoline page body.
-        //
-        // RVA hardcoded for the current ntoskrnl.exe (10.0.19041.7058);
-        // bump on patch.  TODO: pull via IOCTL_HV_SET_NCP_RVA from a
-        // user-mode resolver that walks ntoskrnl.exe's PDB.
-        ULONG ncp_rva = 0x95ac10;
-        __cpuidex(regs_buf, 0x4F504853, (int)ncp_rva);
-        hv_log("[hv] OPHS push NCP rva=0x%x: a=0x%x b=0x%x c=0x%x d=0x%x\n",
-               ncp_rva,
-               regs_buf[0], regs_buf[1], regs_buf[2], regs_buf[3]);
-
-        __cpuidex(regs_buf, 0x4F504858, 0xFF);
-        hv_log("[hv] OPHX uncloaked install: a=0x%x b=0x%x c=0x%x d=0x%x\n",
-               regs_buf[0], regs_buf[1], regs_buf[2], regs_buf[3]);
-
-        // Sub 0 reads install status (status_code, install_attempted, ...).
-        __cpuidex(regs_buf, 0x4F504858, 0);
-        hv_log("[hv] OPHX install status: a=0x%x b=0x%x c=0x%x d=0x%x\n",
-               regs_buf[0], regs_buf[1], regs_buf[2], regs_buf[3]);
-
-        // OPHR sub 8: trampoline VA in EBX:ECX.  Drives relay arming
-        // because relay_parse_trampoline_va can't recover it on Win10
-        // 19041 where NtCreateProfile is not an exported symbol.
-        __cpuidex(regs_buf, 0x4F504852, 8);
-        UINT64 vmm_tramp_va = (UINT64)(UINT32)regs_buf[1] |
-                              ((UINT64)(UINT32)regs_buf[2] << 32);
-        hv_log("[hv] OPHR sub 8: tramp_lo=0x%x tramp_hi=0x%x va=0x%llx\n",
-               regs_buf[1], regs_buf[2], vmm_tramp_va);
-        relay_set_trampoline_va(vmm_tramp_va);
-
-        KeRevertToUserAffinityThreadEx(old_aff);
+        PVOID thread_obj = NULL;
+        if (NT_SUCCESS(ObReferenceObjectByHandle(thread_handle, SYNCHRONIZE,
+                                                 *PsThreadType, KernelMode,
+                                                 &thread_obj, NULL)))
+        {
+            KeWaitForSingleObject(thread_obj, Executive, KernelMode, FALSE, NULL);
+            ObDereferenceObject(thread_obj);
+        }
+        ZwClose(thread_handle);
+    }
+    else
+    {
+        hv_log("[hv] PsCreateSystemThread for bring-up failed: 0x%X\n",
+               thread_status);
     }
 
     {
