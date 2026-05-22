@@ -61,19 +61,22 @@ SessionVmcallUnregister(_In_ POPHION_SESSION session)
 VOID
 DriverUnload(_In_ PDRIVER_OBJECT driver_obj)
 {
-    hv_log("[hv] Unloading hypervisor driver...\n");
+    hv_log("[hv] Unloading bridge driver...\n");
 
+    // Bridge-only mode: VMM lifecycle is owned by UEFI OphionDxe. We never
+    // ran vmx_init/broadcast_virtualize_all from DriverEntry, so there is
+    // nothing for vmx_terminate / broadcast_terminate_all to clean up here.
+    // Calling them anyway would have left HOST_RIP pointing into our image
+    // on any AP we accidentally VMXONed (APs are bare-metal under BSP-only
+    // UEFI virt) and BSODed the box on the next vmexit after unload.
     relay_shutdown();
-
-    broadcast_terminate_all();
-    vmx_terminate();
 
     if (driver_obj->DeviceObject)
     {
         IoDeleteDevice(driver_obj->DeviceObject);
     }
 
-    hv_log("[hv] Driver unloaded.\n");
+    hv_log("[hv] Bridge driver unloaded.\n");
 }
 
 NTSTATUS
@@ -112,10 +115,24 @@ DriverEntry(
     driver_obj->MajorFunction[IRP_MJ_CLOSE]          = DriverClose;
     driver_obj->MajorFunction[IRP_MJ_DEVICE_CONTROL] = DriverIoControl;
 
-    if (!vmx_init())
+    // Bridge-only mode: this driver no longer owns the VMX root state
+    // because UEFI OphionDxe already runs the hypervisor. Calling
+    // vmx_init() here would VMXON every CPU and set HOST_RIP into
+    // driver image; once the driver unloads, any subsequent vmexit
+    // on a bare-metal AP (APs are not BSP-virt'd today) would page-
+    // fault into the freed image - exact BSOD signature observed
+    // 2026-05-22 (DRIVER_IRQL_NOT_LESS_OR_EQUAL,
+    // <Unloaded_Ophion.sys>+0x5a30 = asm_vmexit_handler).
+    //
+    // From here on the driver only owns:
+    //   - \Device\<obscure-name> create/cleanup
+    //   - per-handle session in FsContext
+    //   - relay worker + trampoline VMCALL path
+    //   - IOCTL surface (REGISTER/RESOLVE/UNREGISTER/READ_SCATTER/WRITE_MANY/...)
+
+    if (!vmx_check_support())
     {
-        hv_log("[hv] VMX initialization FAILED!\n");
-        vmx_terminate();
+        hv_log("[hv] CPU does not support VMX (cannot bridge to UEFI VMM)\n");
         IoDeleteDevice(device_obj);
         return STATUS_HV_OPERATION_FAILED;
     }
