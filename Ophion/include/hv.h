@@ -6,6 +6,7 @@
 //
 // windows kernel headers (used only at PASSIVE/DPC level in non-root)
 //
+#include <ntifs.h>
 #include <ntddk.h>
 #include <intrin.h>
 

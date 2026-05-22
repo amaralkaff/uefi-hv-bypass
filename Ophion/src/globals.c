@@ -2,6 +2,7 @@
 *   globals.c - global variable definitions
 */
 #include "hv.h"
+#include "xhunter_hook.h"
 
 VIRTUAL_MACHINE_STATE *g_vcpu               = NULL;
 EPT_STATE *g_ept                            = NULL;

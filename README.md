@@ -48,9 +48,16 @@ learning/
 .\edk2\build_mongil.cmd
 
 # Ring 0 driver
-& "C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe" `
-  Ophion\Ophion.vcxproj /p:Configuration=Release /p:Platform=x64 /p:SpectreMitigation=false
+& "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe" `
+  Ophion\Ophion.vcxproj /p:Configuration=Release /p:Platform=x64 `
+  /p:SpectreMitigation=false /p:VisualStudioVersion=18.0 /p:SignMode=Off
 ```
+
+Notes:
+- WDK 10.1.28000+ targets VS18 by default; pass `/p:VisualStudioVersion=18.0` so MSBuild
+  finds `Microsoft.DriverKit.Build.Tasks.18.0.dll`.
+- `SignMode=Off` skips test-cert signing for dev builds. Re-enable + provide a fresh
+  `TestCertificate` thumbprint before staging on bench HW.
 
 ## Known limits
 
