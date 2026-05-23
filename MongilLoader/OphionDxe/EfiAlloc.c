@@ -33,8 +33,13 @@ EfiAllocateRuntimePages(SIZE_T Pages)
     if (Pages == 0) return NULL;
 
     EFI_PHYSICAL_ADDRESS phys = 0;
+    // CRITICAL: Use RuntimeServicesData, not Code. Code mappings get
+    // RW-NX policy in Windows kernel post-EBS; our pages need RW for
+    // VMCS / bitmaps / stack / page tables. Allocating as Code causes
+    // silent boot hang after VMLAUNCH when winload remaps EFI runtime
+    // regions and our data pages become read-only / non-writable.
     EFI_STATUS Status = gBS->AllocatePages(AllocateAnyPages,
-                                           EfiRuntimeServicesCode,
+                                           EfiRuntimeServicesData,
                                            Pages,
                                            &phys);
     if (EFI_ERROR(Status)) {
